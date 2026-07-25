@@ -9,6 +9,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "error.h"
@@ -105,6 +106,43 @@ static void log_pac_telemetry(pact_context_t *ctx)
     log_one_workload_pac_dist(wl);
 }
 
+/* pc capacity-aware θ feedback (path 1). Count fast-tier pages and nudge the promotion/
+ * demotion threshold θ toward the capacity target C, so the fast tier converges to the
+ * top-C pages by score. Runs once per stats interval; θ is a double only written here
+ * (single writer) and read by the aggregator — a benign staleness race, θ is a hint. */
+static int pc_cmp_double(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+static void pc_threshold_feedback(pact_context_t *ctx)
+{
+    binning_state_t *bin = ctx->workload->binning;
+    if (ctx->score_mode != SCORE_MODE_PC || !bin || bin->pc_target_frac <= 0.0) {
+        return;
+    }
+    reservoir_t *r = ctx->workload->reservoir;
+    if (!r || r->count < 8) {
+        return;
+    }
+    /* θ = (1 - target_frac) percentile of the score distribution = the top-frac-by-score
+     * cutoff. Stable: recomputed directly from the distribution each interval (no feedback
+     * oscillation). Chase scores highest, so top-frac ≈ chase → chase-first fill. */
+    double frac = bin->pc_target_frac > 0.99 ? 0.99 : bin->pc_target_frac;
+    double *work = malloc(r->count * sizeof(double));
+    if (!work) {
+        return;
+    }
+    memcpy(work, r->samples, r->count * sizeof(double));
+    qsort(work, r->count, sizeof(double), pc_cmp_double);
+    size_t idx = (size_t)((1.0 - frac) * (double)(r->count - 1));
+    bin->pc_threshold = work[idx];
+    free(work);
+    log_info("pc_threshold_feedback", "target_frac=%.3f theta=%.3f (p%.0f of %zu samples)", frac,
+             bin->pc_threshold, (1.0 - frac) * 100.0, r->count);
+}
+
 void stats_coroutine(mco_coro *co)
 {
     pact_context_t *ctx = (pact_context_t *)mco_get_user_data(co);
@@ -130,6 +168,7 @@ void stats_coroutine(mco_coro *co)
         log_info("stats_coroutine", "  PAC: pool_alloc_skip=%lu", st->pool_alloc_skipped);
         log_workload_summary(ctx);
         log_pac_telemetry(ctx);
+        pc_threshold_feedback(ctx); /* pc capacity-aware: nudge θ toward C */
 
         last_stats = *st;
         last_tsc = now;

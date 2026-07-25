@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sched.h>
+#include <time.h>
+#include <math.h>   /* log1p — pc-mode binning score compression */
 #include <sys/mman.h>
 #include <numa.h>
 #include <numaif.h>
@@ -35,6 +37,7 @@
 #include "stats-coro.h"
 #include "cooling.h"
 #include "utils.h"
+#include "pc_class.h"
 
 /* layout invariants — failures would silently break NMI-shared state,
  * pool sizing math, or ring-buffer cache-line guarantees. */
@@ -302,9 +305,9 @@ static inline void update_sample_reservoir(reservoir_t *res, pac_metadata_t *met
  *
  * Threshold policy: only the top bin enters, with no hysteresis. */
 static inline bool should_enter_promotion_pq(pac_metadata_t *meta, binning_state_t *bin,
-                                             size_t bin_index)
+                                             size_t bin_index, size_t promote_from)
 {
-    return bin && bin_index >= (size_t)(bin->bin_count - 1) && meta->tier == 1;
+    return bin && bin_index >= promote_from && meta->tier == 1;
 }
 
 void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls, uint8_t tier,
@@ -331,26 +334,62 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
 
     pact->workload->stats.pac_updates += 1;
 
+    /* pc-mode ONLY: log-compress the accumulated score for BINNING (ranking-preserving).
+     * pc's C1..C3 weight span (16 vs 0.05 = 320x) + 18-bit saturation give a multi-modal,
+     * huge-range PAC distribution that breaks the Freedman-Diaconis IQR threshold
+     * (threshold ~= 2*IQR ~= 2x the C1 level -> only top-C1 promote -> under-promotion).
+     * log1p compresses it to a pac-like distribution so the SAME binning promotes a proper
+     * volume. log is monotonic -> per-page RANKING (the signal) is unchanged; only the
+     * distribution SHAPE the binning sees changes. The pac baseline path is untouched. */
+    double pv = (pact->score_mode == SCORE_MODE_PC)
+                    ? log1p((double)meta->pac_value)
+                    : (double)meta->pac_value;
+
     size_t bin_index = (size_t)-1;
     if (bin && bin->bin_width > 0) {
-        bin_index = (size_t)(meta->pac_value / bin->bin_width);
+        bin_index = (size_t)(pv / bin->bin_width);
     }
     const char *tier_str = (meta->tier == 0) ? "fast" : (meta->tier == 1) ? "slow" : "unknown";
     log_pac_update(pact, "update_pac_entry", pact->workload ? 0 : -1, page_addr, meta->pac_value,
                    tier_str, bin_index);
 
-    update_sample_reservoir(res, meta);
+    reservoir_add_sample(res, pv);   /* was update_sample_reservoir(res, meta); now pc-log-aware */
 
-    if (should_enter_promotion_pq(meta, bin, bin_index) && !meta->migrating) {
-        /* Push directly into migration_ring. meta->migrating gate prevents
-         * double-enqueue; migration thread clears it after numa_move_pages. */
+    /* Migration decision. Two paths, both push to the SPSC migration ring from THIS
+     * (aggregator) thread — the sole producer, so pushing demotes here is race-free. */
+    if (pact->score_mode == SCORE_MODE_PC && bin && bin->pc_target_frac > 0.0) {
+        /* pc CAPACITY-AWARE (path 1): maintain top-C-by-score on the fast tier via a single
+         * feedback threshold θ (stats coroutine nudges θ toward capacity C). Promote slow
+         * pages with score ≥ θ; DEMOTE fast pages with score < θ (criticality-aware demotion,
+         * target_node=1 — the lever PACT lacks). Chase scores highest → fills chase-first. */
+        int target = -1;
+        if (meta->tier == 1 && pv >= bin->pc_threshold) {
+            target = 0; /* promote */
+        } else if (meta->tier == 0 && pv < bin->pc_threshold) {
+            target = 1; /* demote */
+        }
+        if (target >= 0 && !meta->migrating) {
+            meta->migrating = true;
+            migration_entry_t entry = {.meta = meta, .target_node = target};
+            if (ring_buffer_migration_entry_push(pact->workload->migration_ring, entry)) {
+                if (target == 0) {
+                    atomic_inc_relaxed(&pact->workload->stats.promotion_attempts);
+                }
+            } else {
+                meta->migrating = false; /* ring full — retry next sample */
+            }
+        }
+    } else if (should_enter_promotion_pq(meta, bin, bin_index,
+                                         bin ? (size_t)(bin->bin_count - 1) : (size_t)-1)
+               && !meta->migrating) {
+        /* Baseline pac (and pc without capacity set): strict top-bin promotion, unchanged. */
         meta->migrating = true;
         ring_buffer_migration_entry_t *ring = pact->workload->migration_ring;
         migration_entry_t entry = {.meta = meta, .target_node = 0};
         if (ring_buffer_migration_entry_push(ring, entry)) {
             atomic_inc_relaxed(&pact->workload->stats.promotion_attempts);
         } else {
-            meta->migrating = false; /* ring full — let next sample retry */
+            meta->migrating = false;
         }
     }
 
@@ -361,12 +400,60 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
 /* Migration Thread: busy-waits on the workload's migration ring and
  * dispatches numa_move_pages. */
 
+/* --- Migration event log (opt-in via PACT_MIGRATION_EVENTS_CSV) --------------
+ * One CSV row per successful per-page tier change, so promote/demote can be
+ * overlaid on an access heatmap. Format matches the shared plotting tool:
+ *   timestamp_ms,va,target_node,op   (op = promote|demote)
+ * Zero overhead when the env var is unset. Written only from the single
+ * migration path below (one writer), so no lock is needed. NOTE: only captures
+ * PACT's userspace numa_move_pages migrations (promotions); kernel-LRU
+ * demotions do not pass through here. */
+static FILE *g_mig_log_fp = NULL;
+static bool g_mig_log_done = false;
+static struct timespec g_mig_log_t0;
+
+static void mig_log_init_once(void)
+{
+    if (g_mig_log_done) {
+        return;
+    }
+    g_mig_log_done = true;
+    const char *path = getenv("PACT_MIGRATION_EVENTS_CSV");
+    if (!path || path[0] == '\0') {
+        return;
+    }
+    g_mig_log_fp = fopen(path, "w");
+    if (!g_mig_log_fp) {
+        log_warning("mig_log", "fopen(%s) failed: %s", path, strerror(errno));
+        return;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &g_mig_log_t0);
+    fprintf(g_mig_log_fp, "timestamp_ms,va,target_node,op\n");
+    fflush(g_mig_log_fp);
+    log_info("mig_log", "migration event log -> %s", path);
+}
+
+static inline void mig_log_event(uint64_t va, int target_node, const char *op)
+{
+    if (!g_mig_log_fp) {
+        return;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    /* absolute CLOCK_MONOTONIC ms so it shares a time origin with the PEBS
+     * heat-sample dump (PACT_PEBS_SAMPLES_CSV) for a correct overlay. */
+    double ts_ms = now.tv_sec * 1000.0 + now.tv_nsec / 1e6;
+    (void)g_mig_log_t0;
+    fprintf(g_mig_log_fp, "%.3f,0x%lx,%d,%s\n", ts_ms, (unsigned long)va, target_node, op);
+}
+
 /* Process per-page numa_move_pages results — must be thread-safe vs main thread.
  * Every entry in the migration ring is a promotion (target_node=0); demotion
  * is handled by the kernel's demotion_enabled toggle, not numa_move_pages. */
 static void process_migration_batch_results(pact_context_t *ctx, pac_metadata_t **metas,
                                             int *status, int count, long result, int errno_val)
 {
+    mig_log_init_once();
     if (result < 0 && !(result == -1 && errno_val == ENOMEM)) {
         log_error("migration_thread", "numa_move_pages failed: %ld, errno=%d", result, errno_val);
     }
@@ -386,8 +473,33 @@ static void process_migration_batch_results(pact_context_t *ctx, pac_metadata_t 
             /* Promotion failed — mark as not migrating so it can be re-selected. */
             meta->migrating = false;
             atomic_inc_relaxed(&ctx->workload->stats.promotion_failures);
-            log_trace("migration_thread", "Page %p migration failed with status %d, error is:%s",
-                      (void *)meta->page_addr, status[i], strerror(-status[i]));
+            /*
+             * Diagnose carefully: we init status[i]=-1 before the syscall.
+             * On Linux 6.3, move_pages_and_store_status() skips store_status()
+             * when migrate_pages() fails, so status stays -1. Counting that as
+             * errno 1 (EPERM) is wrong — shared-page rejects are -EACCES.
+             */
+            if (status[i] == -1) {
+                atomic_inc_relaxed(&ctx->workload->stats.promotion_fail_status_unset);
+                if (result < 0) {
+                    int e = errno_val;
+                    if (e >= 0 && e < 128) {
+                        atomic_inc_relaxed(&ctx->workload->stats.promotion_fail_syscall_errno[e]);
+                    }
+                } else if (result > 0) {
+                    atomic_inc_relaxed(&ctx->workload->stats.promotion_fail_migrate_aborted);
+                }
+                log_trace("migration_thread",
+                          "Page %p status unset (-1); batch result=%ld errno=%d",
+                          (void *)meta->page_addr, result, errno_val);
+            } else {
+                int e = -status[i];
+                if (e >= 0 && e < 128) {
+                    atomic_inc_relaxed(&ctx->workload->stats.promotion_fail_errno[e]);
+                }
+                log_trace("migration_thread", "Page %p migration failed with status %d, error is:%s",
+                          (void *)meta->page_addr, status[i], strerror(-status[i]));
+            }
             continue;
         }
 
@@ -430,12 +542,17 @@ static void process_migration_batch_results(pact_context_t *ctx, pac_metadata_t 
                 demotion_success++;
             }
 
+            mig_log_event(meta->page_addr, new_tier, new_tier == 0 ? "promote" : "demote");
+
             /* Update prev_tier for ping-pong detection */
             meta->prev_tier = old_tier;
         }
         meta->migrating = false;
     }
 
+    if (g_mig_log_fp) {
+        fflush(g_mig_log_fp); /* one flush per batch — cheap, survives kill */
+    }
     log_debug("migration_thread", "Batch processed: %lu promotions, %lu demotions, %d total",
               promotion_success, demotion_success, count);
 }
@@ -914,6 +1031,16 @@ static void init_workload_binning(pact_context_t *pact)
 {
     pact->workload->binning->bin_width = pact->bin_width;
     pact->workload->binning->bin_count = pact->bin_count;
+    /* pc capacity-aware mode: target fast-tier fraction (top-frac by score). 0 = off.
+     * θ = the (1-frac) percentile of the score distribution, computed each stats interval —
+     * stable and units-free (fraction of the distribution, not absolute page count). */
+    const char *frac = getenv("PACT_FAST_TIER_FRAC");
+    pact->workload->binning->pc_target_frac = (frac && *frac) ? strtod(frac, 0) : 0.0;
+    pact->workload->binning->pc_threshold = 1e18; /* promote-nothing until first percentile calc */
+    if (pact->workload->binning->pc_target_frac > 0.0) {
+        log_info("init_workload_binning", "pc capacity-aware mode: target_frac=%.3f",
+                 pact->workload->binning->pc_target_frac);
+    }
 }
 
 /* Stamp now_tsc into every coroutine's next/prev tsc slot so the event loop
@@ -1083,6 +1210,11 @@ void pact_destroy(pact_context_t *pact)
     if (pact->pebs_aggregator) {
         pebs_aggregator_destroy(pact->pebs_aggregator);
         pact->pebs_aggregator = NULL;
+    }
+    if (pact->pc_class) {
+        pc_class_log_stats_final(pact->pc_class);
+        pc_class_destroy(pact->pc_class);
+        pact->pc_class = NULL;
     }
     destroy_cha_state(pact);
     destroy_per_cpu_pebs(pact);
@@ -1339,6 +1471,54 @@ static int initialize_pact_context(pact_context_t *pact, const pact_config_t *co
     }
     pact->k_constant_dram = g_pmu_platform.k_constant_dram;
     pact->k_constant_cxl = g_pmu_platform.k_constant_cxl;
+
+    /* Scoring mode + optional PC-class. PC-class needs BOTH paths. */
+    bool want_weights = config->class_weights_path[0] != '\0';
+    bool want_map = config->pc_class_map_path[0] != '\0';
+    if (want_weights ^ want_map) {
+        log_error("pact_init",
+                  "PC-class needs both --class-weights and --pc-class-map "
+                  "(got weights=%s map=%s)",
+                  want_weights ? "yes" : "no", want_map ? "yes" : "no");
+        return -1;
+    }
+
+    /* Resolve AUTO: pac+pc if PC files supplied, else pac (baseline). */
+    score_mode_t mode = config->score_mode;
+    if (mode == SCORE_MODE_AUTO) {
+        mode = (want_weights && want_map) ? SCORE_MODE_PAC_PC : SCORE_MODE_PAC;
+    }
+    pact->score_mode = mode;
+
+    bool need_pc = (mode == SCORE_MODE_PC || mode == SCORE_MODE_PAC_PC);
+    if (need_pc) {
+        if (!want_weights || !want_map) {
+            log_error("pact_init",
+                      "--score-mode %s requires --class-weights and --pc-class-map",
+                      mode == SCORE_MODE_PC ? "pc" : "pac+pc");
+            return -1;
+        }
+        pact->pc_class = pc_class_create();
+        if (!pact->pc_class) {
+            log_error("pact_init", "pc_class_create failed");
+            return -1;
+        }
+        if (pc_class_load_weights(pact->pc_class, config->class_weights_path) != 0 ||
+            pc_class_load_map(pact->pc_class, config->pc_class_map_path) != 0 ||
+            pc_class_enable_for_pid(pact->pc_class, config->target_pid) != 0) {
+            pc_class_destroy(pact->pc_class);
+            pact->pc_class = NULL;
+            return -1;
+        }
+        printf("Scoring mode: %s (weights=%s map=%s)\n",
+               mode == SCORE_MODE_PC ? "pc (pure PC-class: score=w_c)"
+                                     : "pac+pc (PAC x w_c)",
+               config->class_weights_path, config->pc_class_map_path);
+    } else {
+        printf("Scoring mode: pac (baseline)%s\n",
+               (want_weights && want_map) ? "; ignoring supplied PC-class files" : "");
+    }
+
     return 0;
 }
 

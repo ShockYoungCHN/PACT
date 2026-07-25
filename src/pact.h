@@ -32,6 +32,18 @@ typedef struct mco_coro mco_coro;
 /* pact_context_t is forward-declared in pmu.h (included above) */
 
 /*
+ * Page-criticality scoring policy. Lets PACT (PAC), the PC-class method, and
+ * their combination run in the SAME runtime so an A/B is fair (only the
+ * per-sample score differs; sampling/binning/migration are shared).
+ */
+typedef enum {
+    SCORE_MODE_AUTO = -1,  /* init resolves: pac+pc if PC files given, else pac */
+    SCORE_MODE_PAC = 0,    /* vanilla PACT: PAC only (baseline) */
+    SCORE_MODE_PC = 1,     /* pure PC-class: per-sample score = w_c (ignore PAC) */
+    SCORE_MODE_PAC_PC = 2, /* combined: PAC * w_c */
+} score_mode_t;
+
+/*
  * PAC metadata. The tier/flag bytes are updated concurrently by the
  * sampling path and the migration thread; each is an _Atomic byte so a
  * store is its own memory location. (As bitfields they shared one word,
@@ -144,6 +156,15 @@ typedef struct {
     size_t bin_count;
     double q1, q3; /* Quartiles */
     uint64_t last_update;
+    /* pc-mode capacity-aware promotion/demotion: single score threshold θ (in the same
+     * units as the binning score, i.e. log1p(pac_value) for pc). Aggregator promotes
+     * slow pages with score≥θ and demotes fast pages with score<θ; the stats coroutine
+     * nudges θ up/down to keep the fast-tier page count near the capacity target C.
+     * Maintains "top-C pages by score on fast tier" = fills chase-first + criticality-aware
+     * demotion (the lever PACT lacks; its demotion is kernel-LRU). pc mode only. */
+    double pc_threshold;   /* θ = the (1 - pc_target_frac) percentile of the score dist,
+                            * recomputed each stats interval (stable, no feedback oscillation) */
+    double pc_target_frac; /* target fast-tier fraction (top-frac by score); 0 = feature off */
 } binning_state_t;
 
 /* Comprehensive statistics structure */
@@ -157,6 +178,18 @@ typedef struct {
     _Atomic uint64_t promotion_attempts;
     _Atomic uint64_t promotion_successes;
     _Atomic uint64_t promotion_failures;
+    /* Histogram of real per-page -status[i] from numa_move_pages (errno).
+     * status==-1 is NOT counted here: that is our pre-syscall initializer;
+     * Linux 6.3 leaves status untouched when migrate_pages() fails mid-batch
+     * (common under node0 pressure with __GFP_THISNODE). */
+    _Atomic uint64_t promotion_fail_errno[128];
+    /* Pages still at status==-1 after the syscall (kernel never wrote status). */
+    _Atomic uint64_t promotion_fail_status_unset;
+    /* Among status-unset pages: batches where syscall returned <0 (use errno). */
+    _Atomic uint64_t promotion_fail_syscall_errno[128];
+    /* Among status-unset pages: batches where syscall returned >0 (# pages
+     * migrate_pages could not complete — typically target-node alloc fail). */
+    _Atomic uint64_t promotion_fail_migrate_aborted;
     /* Kernel LRU demotions this run (owned by balance.c: pgdemote deltas
      * relative to the startup baseline). */
     uint64_t demotion_successes;
@@ -296,6 +329,10 @@ struct pact_context {
     /* ===== PEBS and PMU ===== */
     struct pebs_aggregator *pebs_aggregator; /* PEBS aggregator */
     bool pebs_available;                     /* PEBS availability flag */
+
+    /* Optional PC → behavior-class scaling (NULL or disabled = identity). */
+    struct pc_class_state *pc_class;
+    score_mode_t score_mode; /* pac | pc | pac+pc (resolved in init) */
 
     /* ===== Configuration ===== */
     /* Policies */

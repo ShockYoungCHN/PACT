@@ -81,6 +81,7 @@ static const pmu_platform_t platform_skx = {
     .fill_tor_config = generic_fill_tor_config,
     .mlp_min = 1.0,
     .mlp_max = 16.0,
+    /* Paper/artifact SKX defaults (c220g5). */
     .k_constant_dram = 238,
     .k_constant_cxl = 771,
 };

@@ -490,7 +490,8 @@ int setup_pebs_event(per_cpu_state_t *cpu_state, pid_t pid, int cpu)
     pe.type = PERF_TYPE_RAW;
     pe.size = sizeof(pe);
     pe.sample_period = cpu_state->pebs_sampling_period;
-    pe.sample_type = PERF_SAMPLE_ADDR | PERF_SAMPLE_TID;
+    /* Bit order in the sample payload: IP, then TID, then ADDR. */
+    pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_ADDR;
     pe.exclude_kernel = 1;
     pe.exclude_hv = 1;
     pe.exclude_idle = 1;

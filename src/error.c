@@ -27,7 +27,9 @@ void (*log_error_fn)(const char *function, const char *format, ...) = log_error_
 void (*log_warning_fn)(const char *function, const char *format, ...) = log_warning_impl;
 void (*log_info_fn)(const char *function, const char *format, ...) = log_info_impl;
 void (*log_debug_fn)(const char *function, const char *format, ...) = noop_log;
-void (*log_trace_fn)(const char *function, const char *format, ...) = log_trace_impl;
+/* Default must be noop: otherwise TRACE floods stdout before any --log-level
+ * is parsed (run-pact redirects that to a multi-GB pact_debug.log). */
+void (*log_trace_fn)(const char *function, const char *format, ...) = noop_log;
 
 /* Thread-safety contract ():
  *

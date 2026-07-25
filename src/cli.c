@@ -194,6 +194,39 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
             config->pac_pool_max = (size_t)strtoull(argv[i], NULL, 10);
             printf("PAC metadata pool cap: %zu entries (~%zu MB at 128B/entry)\n",
                    config->pac_pool_max, config->pac_pool_max * 128 / (1024 * 1024));
+        } else if (strcmp(argv[i], "--class-weights") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: --class-weights requires a PATH argument\n");
+                return -1;
+            }
+            strncpy(config->class_weights_path, argv[i], sizeof(config->class_weights_path) - 1);
+            config->class_weights_path[sizeof(config->class_weights_path) - 1] = '\0';
+            printf("Class weights: %s\n", config->class_weights_path);
+        } else if (strcmp(argv[i], "--pc-class-map") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: --pc-class-map requires a PATH argument\n");
+                return -1;
+            }
+            strncpy(config->pc_class_map_path, argv[i], sizeof(config->pc_class_map_path) - 1);
+            config->pc_class_map_path[sizeof(config->pc_class_map_path) - 1] = '\0';
+            printf("PC-class map: %s\n", config->pc_class_map_path);
+        } else if (strcmp(argv[i], "--score-mode") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: --score-mode requires an argument (pac|pc|pac+pc)\n");
+                return -1;
+            }
+            if (strcmp(argv[i], "pac") == 0) {
+                config->score_mode = SCORE_MODE_PAC;
+            } else if (strcmp(argv[i], "pc") == 0) {
+                config->score_mode = SCORE_MODE_PC;
+            } else if (strcmp(argv[i], "pac+pc") == 0 || strcmp(argv[i], "pacpc") == 0) {
+                config->score_mode = SCORE_MODE_PAC_PC;
+            } else {
+                fprintf(stderr, "Error: --score-mode must be pac, pc, or pac+pc (got %s)\n",
+                        argv[i]);
+                return -1;
+            }
+            printf("Scoring mode: %s\n", argv[i]);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             pact_print_usage(argv[0]);
             return 1;

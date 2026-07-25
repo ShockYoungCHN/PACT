@@ -73,6 +73,22 @@ void pact_print_usage(const char *prog_name)
     printf("                                    promoted + M pages; larger M = more "
            "proactive\n");
     printf("                                    fast-tier headroom (default 0).\n");
+    printf("  --class-weights PATH              Calibrated class weights JSON "
+           "(with --pc-class-map).\n");
+    printf("  --pc-class-map PATH               Offline PC offset→class map "
+           "(with --class-weights).\n");
+    printf("                                    Both required to enable PC-class "
+           "PAC scaling; map keys\n");
+    printf("                                    are main-binary file offsets "
+           "(PIE-safe).\n");
+    printf("  --score-mode MODE                 Page-criticality scoring policy "
+           "(fair A/B):\n");
+    printf("                                    pac    = PACT PAC only (baseline; "
+           "default)\n");
+    printf("                                    pc     = pure PC-class "
+           "(score = w_c; needs both files)\n");
+    printf("                                    pac+pc = PAC x w_c "
+           "(default when both files given)\n");
 
     printf("\nTiming (milliseconds):\n");
     printf("  --sampling-interval MS            Sampling cadence (default 20).\n");

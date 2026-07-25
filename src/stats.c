@@ -45,6 +45,41 @@ static void print_promotion_profile(pact_context_t *pact)
                       pact->workload->stats.promotion_attempts * 100.0;
         printf("Promotion Success Rate: %.1f%%\n", rate);
     }
+    printf("Promotion fail breakdown:\n");
+    printf("  status unset (kernel never wrote; was init -1): %lu\n",
+           (unsigned long)pact->workload->stats.promotion_fail_status_unset);
+    printf("    of those, migrate aborted (syscall result>0): %lu\n",
+           (unsigned long)pact->workload->stats.promotion_fail_migrate_aborted);
+    printf("    of those, syscall failed (result<0) by errno:\n");
+    {
+        int any = 0;
+        for (int e = 0; e < 128; e++) {
+            uint64_t c = pact->workload->stats.promotion_fail_syscall_errno[e];
+            if (c == 0) {
+                continue;
+            }
+            any = 1;
+            printf("      errno %d (%s): %lu\n", e, strerror(e), (unsigned long)c);
+        }
+        if (!any) {
+            printf("      (none)\n");
+        }
+    }
+    printf("  real per-page status errno (nonzero):\n");
+    {
+        int any = 0;
+        for (int e = 0; e < 128; e++) {
+            uint64_t c = pact->workload->stats.promotion_fail_errno[e];
+            if (c == 0) {
+                continue;
+            }
+            any = 1;
+            printf("    errno %d (%s): %lu\n", e, strerror(e), (unsigned long)c);
+        }
+        if (!any) {
+            printf("    (none)\n");
+        }
+    }
 }
 
 static void print_hash_table_stats(pact_context_t *pact)

@@ -63,6 +63,14 @@ typedef struct pact_config {
 
     /* PAC metadata pool cap */
     size_t pac_pool_max;
+
+    /* Optional PC-class scaling (both paths required to enable). */
+    char class_weights_path[512];
+    char pc_class_map_path[512];
+
+    /* Scoring policy. SCORE_MODE_AUTO (default) resolves to pac+pc when PC
+     * files are supplied, else pac. Override with --score-mode {pac|pc|pac+pc}. */
+    score_mode_t score_mode;
 } pact_config_t;
 
 /* Initialize all fields of `config` to documented defaults. */

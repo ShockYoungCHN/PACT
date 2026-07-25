@@ -9,6 +9,8 @@ source ./cxl-global.sh || { echo "Error: cannot source ./cxl-global.sh" >&2; exi
 
 # Uncore frequency args (kHz): node0-min node0-max node1-min node1-max
 # Default: fast tier (node 0) pinned high, slow tier (node 1) pinned low.
+# Paper/artifact: 2000/2000 + 500/500. On this Silver 4114, MLC --latency_matrix
+# under that lock measures ~91/~192 ns (paper targets ~90/~190).
 UNCORE_ARGS="${UNCORE_ARGS:-2000000 2000000 500000 500000}"
 
 echo "=== [1/4] Setting uncore frequency: $UNCORE_ARGS ==="

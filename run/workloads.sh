@@ -39,18 +39,35 @@ UBENCH_DIR="${UBENCH_DIR:-/path/to/microbenchmarks}"
 # and update _rss (kbytes/1024 -> MB), then re-size memmap = _rss/2 for 1:1.
 
 # --- bc_kron_8t : GAP betweenness-centrality on a Kronecker graph, 8 threads
+# Paper/artifact: converter -g27 -k16, -i4 -n4, CPUs 2-9.
 bc_kron_8t_pname="bc"
 bc_kron_8t_rss=20000
 bc_kron_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/kron.sg"
 bc_kron_8t_omp_threads=8
 bc_kron_8t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/kron.sg -i4 -n4"
 
-# --- bc_kron_4t : same workload, 4 threads
+# --- bc_kron_4t : same graph/RSS, 4 threads on CPUs 2-5 (half the cores).
 bc_kron_4t_pname="bc"
 bc_kron_4t_rss=20000
 bc_kron_4t_vmtouch_file="${GAPBS_GRAPH_DIR}/kron.sg"
 bc_kron_4t_omp_threads=4
 bc_kron_4t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/kron.sg -i4 -n4"
+
+# --- bc_urand_8t : GAP bc on uniform-random graph (-u27 -k16), 8 threads
+# Same scale/RSS class as bc_kron (~20 GB); memmap=86G!2G → ~1:1. -i4 -n4.
+bc_urand_8t_pname="bc"
+bc_urand_8t_rss=20000
+bc_urand_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/urand.sg"
+bc_urand_8t_omp_threads=8
+bc_urand_8t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/urand.sg -i4 -n4"
+
+# --- bc_urand_log : identical to bc_urand_8t but -l (per-source phase timing:
+#     'b'=forward PBFS [atomic/barrier-bound], 'p'=backward accum [gather-bound])
+bc_urand_log_pname="bc"
+bc_urand_log_rss=20000
+bc_urand_log_vmtouch_file="${GAPBS_GRAPH_DIR}/urand.sg"
+bc_urand_log_omp_threads=8
+bc_urand_log_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/urand.sg -i4 -n4 -l"
 
 # --- bwaves_8t : SPEC CPU 2017 603.bwaves_s, 8 threads
 bwaves_8t_pname="speed_bwaves_base.mytest-m64"

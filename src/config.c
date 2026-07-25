@@ -40,4 +40,8 @@ void pact_init_config(pact_config_t *config)
     config->migration_cpu = -1;
 
     config->pac_pool_max = PACT_DEFAULT_PAC_POOL_MAX;
+
+    config->class_weights_path[0] = '\0';
+    config->pc_class_map_path[0] = '\0';
+    config->score_mode = SCORE_MODE_AUTO;
 }

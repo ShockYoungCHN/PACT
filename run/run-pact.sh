@@ -52,6 +52,16 @@ pebs_period="${pebs_period:-400}"
 migration_limit="${migration_limit:-4096}"
 bin_count="${bin_count:-20}"
 bin_width="${bin_width:-1000.0}"
+# Optional PC-class scaling (both required). Map must be built from the same
+# workload binary that will run (PIE offsets). Example:
+#   pc_class_weights=/users/samuraiy/pc_driven/results/class_weights.json \
+#   pc_class_map=/users/samuraiy/pc_driven/results/gapbs/bc-urand/pc_class.map \
+#   ./run-pact.sh bc_urand_8t
+pc_class_weights="${pc_class_weights:-}"
+pc_class_map="${pc_class_map:-}"
+# Scoring policy for a fair A/B: pac (baseline) | pc (pure PC-class) | pac+pc.
+# Empty = PACT default (pac+pc if PC files given, else pac).
+score_mode="${score_mode:-}"
 
 # --- Tier placement (paper methodology: first-touch, PACT is the placer) ---
 # The workload's memory is allocated FIRST-TOUCH (default NUMA policy): we
@@ -99,21 +109,42 @@ if [ "$enable_thp" = "true" ]; then
     prev_thp_defrag=$(printf '%s\n' "$thp_defrag_line" | grep -oE '\[[a-z]+\]' | tr -d '[]' || true)
 fi
 
+# --- Enable PACT runtime (set enable_pact=false for NoTier baseline) ---
+enable_pact="${enable_pact:-true}"
+
 # --- Output Directory ---
 # Fixed per-workload path. The monitor logs below (vmstat.txt, numastat.log)
 # are appended to during the run, so truncate them up front - otherwise a
 # re-run interleaves its samples with the previous run's.
-OUTDIR="./results/${WORKLOAD}/pact"
+# Optional results_tag overrides the leaf dir name (e.g. results_tag=pact_pc).
+results_tag="${results_tag:-}"
+if [ -n "$results_tag" ]; then
+    OUTDIR="./results/${WORKLOAD}/${results_tag}"
+elif [ "$enable_pact" = "true" ]; then
+    OUTDIR="./results/${WORKLOAD}/pact"
+else
+    OUTDIR="./results/${WORKLOAD}/notier"
+fi
 mkdir -p "$OUTDIR"
 OUTDIR=$(realpath "$OUTDIR")
 : >"$OUTDIR/vmstat.txt"
 : >"$OUTDIR/numastat.log"
 
-echo "=== PACT Run: $WORKLOAD ==="
+if [ "$enable_pact" = "true" ]; then
+    echo "=== PACT Run: $WORKLOAD ==="
+else
+    echo "=== NoTier Run: $WORKLOAD ==="
+fi
 echo "  CPUs: $cpus ($omp_threads threads)"
-echo "  PEBS period: $pebs_period"
-echo "  Migration limit: $migration_limit"
-echo "  Bin count: $bin_count, Bin width: $bin_width"
+if [ "$enable_pact" = "true" ]; then
+    echo "  PEBS period: $pebs_period"
+    echo "  Migration limit: $migration_limit"
+    echo "  Bin count: $bin_count, Bin width: $bin_width"
+    if [ -n "$pc_class_weights" ] || [ -n "$pc_class_map" ]; then
+        echo "  PC-class weights: ${pc_class_weights:-<unset>}"
+        echo "  PC-class map: ${pc_class_map:-<unset>}"
+    fi
+fi
 echo "  Output: $OUTDIR"
 echo ""
 
@@ -307,38 +338,59 @@ touch "$OUTDIR/numastat.log"
 done) &
 pid_numastat=$!
 
-# --- Phase 4: Start PACT ---
-echo "=== Phase 4: Starting PACT ==="
-
+# --- Phase 4: Start PACT (skipped for NoTier) ---
 start_time=$(date +%s)
 
-# PACT needs root (euid 0) to open the CHA/uncore PMU and PEBS counters
-# (validate_hardware_access() aborts otherwise). Launch it under sudo; the
-# machine is assumed to allow passwordless sudo (CloudLab does).
-#
-# No core pinning by default: PACT's CPU-affinity knobs (--monitor-cpu,
-# --migration-cpu) default to -1 (unpinned), so the OS schedules the
-# coroutine event loop and the migration thread. Pin them explicitly
-# (e.g. --monitor-cpu 1 --migration-cpu 1) to reserve a dedicated core.
-PACT_CMD="sudo $PACT \
-    --workload $WORKLOAD_PID \
-    --pebs-period $pebs_period \
-    --max-migrations-per-cycle $migration_limit \
-    --bin-width $bin_width \
-    --bin-count $bin_count"
+if [ "$enable_pact" = "true" ]; then
+    echo "=== Phase 4: Starting PACT ==="
 
+    # PACT needs root (euid 0) to open the CHA/uncore PMU and PEBS counters
+    # (validate_hardware_access() aborts otherwise). Launch it under sudo; the
+    # machine is assumed to allow passwordless sudo (CloudLab does).
+    #
+    # No core pinning by default: PACT's CPU-affinity knobs (--monitor-cpu,
+    # --migration-cpu) default to -1 (unpinned), so the OS schedules the
+    # coroutine event loop and the migration thread. Pin them explicitly
+    # (e.g. --monitor-cpu 1 --migration-cpu 1) to reserve a dedicated core.
+    # --log-level 2 = info (0=error 1=warn 2=info 3=debug). Keeps TRACE off.
+    # Optional per-page dumps (dump_pages=1). sudo strips env, so pass VAR=val
+    # explicitly on the sudo command line (read by pact via getenv).
+    pact_dump_env=""
+    if [ "${dump_pages:-}" = "1" ]; then
+        pact_dump_env="PACT_MIGRATION_EVENTS_CSV=$OUTDIR/migrations.csv \
+PACT_PEBS_SAMPLES_CSV=$OUTDIR/pebs_samples.csv PACT_PEBS_SAMPLES_STRIDE=${pebs_stride:-20}"
+        echo "  Page dumps ON: $OUTDIR/{migrations,pebs_samples}.csv"
+    fi
+    PACT_CMD="sudo PACT_FAST_TIER_FRAC=${PACT_FAST_TIER_FRAC:-0} $pact_dump_env $PACT \
+        --workload $WORKLOAD_PID \
+        --pebs-period $pebs_period \
+        --max-migrations-per-cycle $migration_limit \
+        --bin-width $bin_width \
+        --bin-count $bin_count \
+        --log-level ${log_level:-2}"
+    if [ -n "$pc_class_weights" ] && [ -n "$pc_class_map" ]; then
+        PACT_CMD="$PACT_CMD --class-weights $pc_class_weights --pc-class-map $pc_class_map"
+    elif [ -n "$pc_class_weights" ] || [ -n "$pc_class_map" ]; then
+        echo "  WARNING: both pc_class_weights and pc_class_map are required; ignoring PC-class flags"
+    fi
+    if [ -n "$score_mode" ]; then
+        PACT_CMD="$PACT_CMD --score-mode $score_mode"
+    fi
 
-echo "  Executing: $PACT_CMD"
-$PACT_CMD >"$OUTDIR/pact_debug.log" 2>&1 &
-PACT_PID=$!
-sleep 3
+    echo "  Executing: $PACT_CMD"
+    $PACT_CMD >"$OUTDIR/pact_debug.log" 2>&1 &
+    PACT_PID=$!
+    sleep 3
 
-if ! ps -p "$PACT_PID" >/dev/null 2>&1; then
-    echo "  FAILED: PACT didn't start"
-    tail -20 "$OUTDIR/pact_debug.log"
-    exit 1
+    if ! ps -p "$PACT_PID" >/dev/null 2>&1; then
+        echo "  FAILED: PACT didn't start"
+        tail -20 "$OUTDIR/pact_debug.log"
+        exit 1
+    fi
+    echo "  PACT started (PID $PACT_PID)"
+else
+    echo "=== Phase 4: Skipping PACT (NoTier baseline) ==="
 fi
-echo "  PACT started (PID $PACT_PID)"
 
 local_mem=$(numastat -p "$WORKLOAD_PID" 2>/dev/null | tail -n1 | awk '{print $2}')
 echo "  Initial memory on node 0: $local_mem MB"

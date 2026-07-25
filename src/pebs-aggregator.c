@@ -22,6 +22,13 @@
 #include "pebs-aggregator.h"
 #include "logging.h"
 #include "minicoro.h"
+#include "pc_class.h"
+
+/* One drained PEBS sample before same-window attribution. */
+typedef struct {
+    uint64_t addr_enc; /* PEBS_ENCODE_ADDR_TIER */
+    uint64_t ip;
+} pebs_staged_sample_t;
 
 #ifndef PAGE_SIZE
 #define PAGE_SIZE sysconf(_SC_PAGESIZE)
@@ -61,7 +68,7 @@ typedef struct pebs_aggregator {
      * FIRST so the window's total sample count A_t is known before the
      * per-sample stall scalar is computed (Algorithm 1 attributes with
      * same-window counts). Sized to the PAC update ring capacity. */
-    uint64_t *cycle_buf;
+    pebs_staged_sample_t *cycle_buf;
     int cycle_buf_cap;
 } pebs_aggregator_t;
 
@@ -90,7 +97,7 @@ pebs_aggregator_t *pebs_aggregator_create(per_cpu_state_t *cpu_states, int num_c
     agg->last_cpu_checked = 0;
 
     agg->cycle_buf_cap = 131072; /* == PAC update ring capacity */
-    agg->cycle_buf = malloc((size_t)agg->cycle_buf_cap * sizeof(uint64_t));
+    agg->cycle_buf = malloc((size_t)agg->cycle_buf_cap * sizeof(pebs_staged_sample_t));
     if (!agg->cycle_buf) {
         free(agg->cpu_states);
         free(agg);
@@ -121,7 +128,7 @@ static inline void ring_copy(void *dst, const char *base, uint64_t off, size_t l
 
 /* Read PEBS events from one CPU. REMOTE_DRAM only. */
 static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_state,
-                                uint64_t *events, int max_events)
+                                pebs_staged_sample_t *events, int max_events)
 {
     if (!cpu_state || cpu_state->fd_pebs < 0 || !cpu_state->pebs_mmap) {
         return 0;
@@ -164,7 +171,7 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
      * end of the buffer. Reassemble each record into a small linear scratch
      * buffer before reading its fields, so a wrapping record is handled
      * correctly instead of reading past the mapping. Our records are tiny
-     * (header + TID + ADDR), so a fixed scratch is sufficient.
+     * (header + IP + TID + ADDR), so a fixed scratch is sufficient.
      */
     int count = 0;
     while (tail < head && count < max_events) {
@@ -179,11 +186,13 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
         if (hdr.type == PERF_RECORD_SAMPLE) {
             /*
              * Sample layout (ordered by sample_type bit position):
+             *   PERF_SAMPLE_IP:       { u64 ip; }
              *   PERF_SAMPLE_TID:      { u32 pid, tid; }
              *   PERF_SAMPLE_ADDR:     { u64 addr; }
              */
             struct {
                 struct perf_event_header header;
+                uint64_t ip;
                 uint32_t pid;
                 uint32_t tid;
                 uint64_t addr;
@@ -191,7 +200,9 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
             if (hdr.size >= sizeof(rec)) {
                 ring_copy(&rec, data, off, sizeof(rec), data_size);
                 if (is_target_pid(agg->pact_ctx, (pid_t)rec.pid)) {
-                    events[count++] = PEBS_ENCODE_ADDR_TIER(rec.addr, 1);
+                    events[count].addr_enc = PEBS_ENCODE_ADDR_TIER(rec.addr, 1);
+                    events[count].ip = rec.ip;
+                    count++;
                     agg->events_per_tier[1]++;
                 }
             }
@@ -226,13 +237,14 @@ static inline uint32_t compute_sample_stalls(uint8_t tier, double fast_stalls, d
     return (uint32_t)base;
 }
 
-/* Decode one PEBS sample into address/tier. */
-static inline void decode_pebs_sample(const uint64_t *events, int i, uint64_t *out_addr,
-                                      uint8_t *out_tier)
+/* Decode one staged PEBS sample into address/tier/ip. */
+static inline void decode_pebs_sample(const pebs_staged_sample_t *events, int i, uint64_t *out_addr,
+                                      uint8_t *out_tier, uint64_t *out_ip)
 {
-    uint64_t encoded = events[i];
+    uint64_t encoded = events[i].addr_enc;
     *out_addr = PEBS_DECODE_ADDR(encoded);
     *out_tier = PEBS_DECODE_TIER(encoded);
+    *out_ip = events[i].ip;
 }
 
 /* Per-workload attributed stalls = k_constant * llc_misses / (mlp * events).
@@ -264,6 +276,58 @@ static void compute_attributed_stalls(pact_context_t *ctx, pebs_aggregator_t *ag
  * S * A_p / A_t with all terms from the same window) and pushes each
  * attributed sample to the PAC update ring.
  */
+/* --- Access-heat sample dump (opt-in via PACT_PEBS_SAMPLES_CSV) --------------
+ * Mirrors REGENT's ProfileDump: PACT dumps its OWN PEBS samples (time + page)
+ * so the heatmap base and the migration overlay come from the SAME run and the
+ * SAME clock, with no external perf capture (no PEBS counter contention).
+ * Subsampled via PACT_PEBS_SAMPLES_STRIDE (default 1). Absolute CLOCK_MONOTONIC
+ * ns aligns with the migration log. Format: "time_ns page_id" (2MB pages). */
+static FILE *g_heat_fp = NULL;
+static bool g_heat_done = false;
+static unsigned long g_heat_stride = 1;
+static unsigned long g_heat_ctr = 0;
+
+static void heat_dump_init_once(void)
+{
+    g_heat_done = true;
+    const char *path = getenv("PACT_PEBS_SAMPLES_CSV");
+    if (!path || !path[0]) {
+        return;
+    }
+    g_heat_fp = fopen(path, "w");
+    if (!g_heat_fp) {
+        return;
+    }
+    const char *s = getenv("PACT_PEBS_SAMPLES_STRIDE");
+    if (s && s[0]) {
+        unsigned long v = strtoul(s, NULL, 10);
+        if (v > 0) {
+            g_heat_stride = v;
+        }
+    }
+    fprintf(g_heat_fp, "time_ns page_id\n");
+}
+
+static inline void heat_dump_sample(uint64_t page_addr)
+{
+    if (!g_heat_done) {
+        heat_dump_init_once();
+    }
+    if (!g_heat_fp) {
+        return;
+    }
+    if ((g_heat_ctr++ % g_heat_stride) != 0) {
+        return;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long long ns = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
+    fprintf(g_heat_fp, "%lld %llu\n", ns, (unsigned long long)(page_addr >> 21));
+    if ((g_heat_ctr & 0x1FFF) == 0) {
+        fflush(g_heat_fp);
+    }
+}
+
 int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
 {
     if (!agg || !ctx) {
@@ -293,7 +357,7 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
         /* Staging full: exhaust this CPU's perf buffer into drop counters
          * so the producer ring cannot wedge. */
         if (n == agg->cycle_buf_cap) {
-            uint64_t scratch[512];
+            pebs_staged_sample_t scratch[512];
             int dropped;
             while ((dropped = read_cpu_pebs_events(agg, cpu_state, scratch, 512)) > 0) {
                 agg->read_events_from_perf += dropped;
@@ -313,11 +377,23 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
     int pac_count = 0;
     for (int i = 0; i < n; i++) {
         uint64_t addr;
+        uint64_t ip;
         uint8_t tier;
-        decode_pebs_sample(agg->cycle_buf, i, &addr, &tier);
+        decode_pebs_sample(agg->cycle_buf, i, &addr, &tier, &ip);
         uint64_t page = addr & PAGE_MASK;
-        uint32_t attributed = compute_sample_stalls(tier, fast_stalls, slow_stalls);
+        uint32_t attributed;
+        if (ctx->score_mode == SCORE_MODE_PC) {
+            /* Pure PC-class: per-sample score = w_c(class(ip)); ignore the PAC
+             * model. Accumulated per page this is score = Σ_c w_c · samples_c. */
+            attributed = pc_class_score(ctx, ip, PAC_VALUE_MAX);
+        } else {
+            attributed = compute_sample_stalls(tier, fast_stalls, slow_stalls);
+            if (ctx->score_mode == SCORE_MODE_PAC_PC) {
+                attributed = scale_by_pc_class(ctx, ip, attributed, PAC_VALUE_MAX);
+            }
+        }
         log_pebs_sample(ctx, "pebs_aggregate_events", 0, addr, tier, attributed);
+        heat_dump_sample(page);
 
         uint64_t pac_encoded = PEBS_ENCODE_PAC(attributed, page, tier);
         if (ring_buffer_uint64_push(ctx->pac_update_ring, pac_encoded) == 0) {
@@ -383,6 +459,9 @@ static void log_workload_pebs_stats(pact_context_t *ctx, pebs_aggregator_t *agg)
     uint64_t processed = agg->events_per_tier[0] + agg->events_per_tier[1];
     log_pebs_aggregator(ctx, "pebs_aggregator_coroutine", 0, theory, processed, agg->lost_events,
                         agg->lost_samples, 0, agg->dropped_events_workload);
+    if (ctx->pc_class) {
+        pc_class_log_stats(ctx->pc_class);
+    }
 }
 
 /* Modified PEBS coroutine that uses aggregator */
