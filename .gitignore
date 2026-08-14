@@ -30,3 +30,4 @@ baselines/*/log
 # out-of-tree module build products (not source)
 *.mod
 setup/kernel/linux/
+setup/env/linux-perf/
