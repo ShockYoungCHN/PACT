@@ -26,3 +26,4 @@ Module.symvers
 modules.order
 baselines/*/linux/
 baselines/*/log
+setup/env/linux-perf/

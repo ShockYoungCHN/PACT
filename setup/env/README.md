@@ -8,12 +8,17 @@ after booting into the PACT kernel (see [`../kernel/`](../kernel/)).
 | `prepare_environment.sh` | One-shot prep: pins uncore frequency, configures the CXL/NUMA layout, and flushes caches. Calls the other two. |
 | `modify-uncore-freq.sh` | Pin per-node min/max uncore frequency (fast tier high, slow tier low). |
 | `cxl-global.sh` | Helper functions (governor, turbo, THP, KSM, NUMA-balancing, cache flush) sourced by the above. |
+| `install-perf.sh` | Build userspace `perf` from **Linux v6.3** (`linux-perf/tools/perf/perf`), matching the PACT kernel. |
 
 ## Usage
 
 ```bash
 # Full one-shot prep (requires root):
 sudo ./prepare_environment.sh
+
+# Userspace perf (clone v6.3, not master):
+./install-perf.sh
+# then: PERF=./linux-perf/tools/perf/perf ...
 ```
 
 Override the default uncore targets via `UNCORE_ARGS` (use `sudo env` so the
