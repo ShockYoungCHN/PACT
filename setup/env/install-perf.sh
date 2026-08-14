@@ -33,6 +33,7 @@ else
 fi
 
 echo "==> Building tools/perf..."
-make -C "${SRC_DIR}/tools/perf" -j"$(nproc)"
+# GCC 14 on Noble treats epoll_pwait(NULL) in tests/bpf.c as -Werror=nonnull.
+make -C "${SRC_DIR}/tools/perf" -j"$(nproc)" WERROR=0
 echo "==> perf: ${SRC_DIR}/tools/perf/perf"
 "${SRC_DIR}/tools/perf/perf" --version
