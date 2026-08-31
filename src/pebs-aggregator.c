@@ -382,7 +382,11 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
         decode_pebs_sample(agg->cycle_buf, i, &addr, &tier, &ip);
         uint64_t page = addr & PAGE_MASK;
         uint32_t attributed;
-        if (ctx->score_mode == SCORE_MODE_PC) {
+        if (ctx->score_mode == SCORE_MODE_FREQ) {
+            /* Fair hotness baseline: this PEBS stream is already restricted
+             * to remote LLC misses, so each sample contributes one unit. */
+            attributed = 1;
+        } else if (ctx->score_mode == SCORE_MODE_PC) {
             /* Pure PC-class: per-sample score = w_c(class(ip)); ignore the PAC
              * model. Accumulated per page this is score = Σ_c w_c · samples_c. */
             attributed = pc_class_score(ctx, ip, PAC_VALUE_MAX);

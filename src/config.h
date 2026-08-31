@@ -69,7 +69,8 @@ typedef struct pact_config {
     char pc_class_map_path[512];
 
     /* Scoring policy. SCORE_MODE_AUTO (default) resolves to pac+pc when PC
-     * files are supplied, else pac. Override with --score-mode {pac|pc|pac+pc}. */
+     * files are supplied, else pac. Override with
+     * --score-mode {pac|freq|pc|pac+pc}. */
     score_mode_t score_mode;
 } pact_config_t;
 

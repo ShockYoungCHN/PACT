@@ -212,17 +212,22 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
             printf("PC-class map: %s\n", config->pc_class_map_path);
         } else if (strcmp(argv[i], "--score-mode") == 0) {
             if (++i >= argc) {
-                fprintf(stderr, "Error: --score-mode requires an argument (pac|pc|pac+pc)\n");
+                fprintf(stderr, "Error: --score-mode requires an argument "
+                                "(pac|freq|pc|pac+pc)\n");
                 return -1;
             }
             if (strcmp(argv[i], "pac") == 0) {
                 config->score_mode = SCORE_MODE_PAC;
+            } else if (strcmp(argv[i], "freq") == 0 ||
+                       strcmp(argv[i], "frequency") == 0) {
+                config->score_mode = SCORE_MODE_FREQ;
             } else if (strcmp(argv[i], "pc") == 0) {
                 config->score_mode = SCORE_MODE_PC;
             } else if (strcmp(argv[i], "pac+pc") == 0 || strcmp(argv[i], "pacpc") == 0) {
                 config->score_mode = SCORE_MODE_PAC_PC;
             } else {
-                fprintf(stderr, "Error: --score-mode must be pac, pc, or pac+pc (got %s)\n",
+                fprintf(stderr,
+                        "Error: --score-mode must be pac, freq, pc, or pac+pc (got %s)\n",
                         argv[i]);
                 return -1;
             }

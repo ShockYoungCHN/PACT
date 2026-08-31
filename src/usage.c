@@ -85,6 +85,8 @@ void pact_print_usage(const char *prog_name)
            "(fair A/B):\n");
     printf("                                    pac    = PACT PAC only (baseline; "
            "default)\n");
+    printf("                                    freq   = sampled remote-miss "
+           "frequency (score = 1 per sample)\n");
     printf("                                    pc     = pure PC-class "
            "(score = w_c; needs both files)\n");
     printf("                                    pac+pc = PAC x w_c "

@@ -32,15 +32,17 @@ typedef struct mco_coro mco_coro;
 /* pact_context_t is forward-declared in pmu.h (included above) */
 
 /*
- * Page-criticality scoring policy. Lets PACT (PAC), the PC-class method, and
- * their combination run in the SAME runtime so an A/B is fair (only the
- * per-sample score differs; sampling/binning/migration are shared).
+ * Page-criticality scoring policy. Lets PACT (PAC), sampled remote-miss
+ * frequency, the PC-class method, and their combination run in the SAME
+ * runtime so an A/B is fair (only the per-sample score differs;
+ * sampling/binning/migration are shared).
  */
 typedef enum {
     SCORE_MODE_AUTO = -1,  /* init resolves: pac+pc if PC files given, else pac */
     SCORE_MODE_PAC = 0,    /* vanilla PACT: PAC only (baseline) */
     SCORE_MODE_PC = 1,     /* pure PC-class: per-sample score = w_c (ignore PAC) */
     SCORE_MODE_PAC_PC = 2, /* combined: PAC * w_c */
+    SCORE_MODE_FREQ = 3,   /* sampled remote-miss frequency: per-sample score = 1 */
 } score_mode_t;
 
 /*

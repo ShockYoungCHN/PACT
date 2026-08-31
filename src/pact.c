@@ -1515,8 +1515,12 @@ static int initialize_pact_context(pact_context_t *pact, const pact_config_t *co
                                      : "pac+pc (PAC x w_c)",
                config->class_weights_path, config->pc_class_map_path);
     } else {
-        printf("Scoring mode: pac (baseline)%s\n",
-               (want_weights && want_map) ? "; ignoring supplied PC-class files" : "");
+        if (mode == SCORE_MODE_FREQ) {
+            printf("Scoring mode: freq (sampled remote-miss frequency)\n");
+        } else {
+            printf("Scoring mode: pac (baseline)%s\n",
+                   (want_weights && want_map) ? "; ignoring supplied PC-class files" : "");
+        }
     }
 
     return 0;
