@@ -443,10 +443,9 @@ static void census_enforce(pact_context_t *pact, mco_coro *co)
             ndemo++;
         }
     }
-    /* Do not promote until at least one demote has been enqueued this run,
-     * and only into real MemFree headroom — otherwise promote success
-     * collapses into a full node0 (~30% vs ~90%). */
-    if (pact->workload->stats.census_enqueued_demote > 0) {
+    /* Promote into MemFree headroom only (demote loop above still runs
+     * first each epoch). Bisect: no "wait for first demote enqueue" gate. */
+    {
         uint64_t free4k = read_node0_free_4k();
         uint32_t promo_cap = left;
         if (free4k <= CENSUS_PROMOTE_HEADROOM_4K) {
