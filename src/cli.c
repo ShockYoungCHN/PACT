@@ -17,6 +17,9 @@
 
 int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
 {
+    bool demotion_margin_set = false;
+    bool fast_tier_frac_set = false;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--sampling-interval") == 0) {
             if (++i >= argc) {
@@ -63,6 +66,37 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
                 return -1;
             }
             config->demotion_margin = (uint64_t)margin;
+            demotion_margin_set = true;
+        } else if (strcmp(argv[i], "--demotion-policy") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: --demotion-policy requires kernel|userspace|off\n");
+                return -1;
+            }
+            if (strcmp(argv[i], "kernel") == 0) {
+                config->demotion_policy = DEMOTION_KERNEL_LRU;
+            } else if (strcmp(argv[i], "userspace") == 0) {
+                config->demotion_policy = DEMOTION_USERSPACE;
+            } else if (strcmp(argv[i], "off") == 0) {
+                config->demotion_policy = DEMOTION_DISABLED;
+            } else {
+                fprintf(stderr,
+                        "Error: --demotion-policy must be kernel, userspace, or off (got %s)\n",
+                        argv[i]);
+                return -1;
+            }
+            printf("Demotion policy: %s\n", argv[i]);
+        } else if (strcmp(argv[i], "--fast-tier-frac") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: --fast-tier-frac requires an argument\n");
+                return -1;
+            }
+            config->fast_tier_frac = atof(argv[i]);
+            if (!(config->fast_tier_frac > 0.0 && config->fast_tier_frac <= 1.0) ||
+                !isfinite(config->fast_tier_frac)) {
+                fprintf(stderr, "Error: --fast-tier-frac must be in (0, 1]\n");
+                return -1;
+            }
+            fast_tier_frac_set = true;
         } else if (strcmp(argv[i], "--bin-count") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "Error: --bin-count requires an argument\n");
@@ -188,12 +222,16 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
         } else if (strcmp(argv[i], "--pac-pool-max") == 0) {
             if (++i >= argc) {
                 fprintf(stderr,
-                        "Error: --pac-pool-max requires an argument (entries; 0=unlimited)\n");
+                        "Error: --pac-pool-max requires an argument (entries; 0=default)\n");
                 return -1;
             }
             config->pac_pool_max = (size_t)strtoull(argv[i], NULL, 10);
-            printf("PAC metadata pool cap: %zu entries (~%zu MB at 128B/entry)\n",
-                   config->pac_pool_max, config->pac_pool_max * 128 / (1024 * 1024));
+            if (config->pac_pool_max == 0) {
+                printf("PAC metadata pool cap: 0 (= built-in default at init)\n");
+            } else {
+                printf("PAC metadata pool cap: %zu entries (~%zu MB at 128B/entry)\n",
+                       config->pac_pool_max, config->pac_pool_max * 128 / (1024 * 1024));
+            }
         } else if (strcmp(argv[i], "--class-weights") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "Error: --class-weights requires a PATH argument\n");
@@ -232,6 +270,40 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
                 return -1;
             }
             printf("Scoring mode: %s\n", argv[i]);
+        } else if (strcmp(argv[i], "--score-sample") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: --score-sample requires a PATH argument\n");
+                return -1;
+            }
+            strncpy(config->score_sample_path, argv[i], sizeof(config->score_sample_path) - 1);
+            config->score_sample_path[sizeof(config->score_sample_path) - 1] = '\0';
+            printf("Score sample CSV: %s\n", config->score_sample_path);
+        } else if (strcmp(argv[i], "--score-regions") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: --score-regions requires a PATH argument\n");
+                return -1;
+            }
+            strncpy(config->score_regions_path, argv[i], sizeof(config->score_regions_path) - 1);
+            config->score_regions_path[sizeof(config->score_regions_path) - 1] = '\0';
+            printf("Score regions: %s\n", config->score_regions_path);
+        } else if (strcmp(argv[i], "--score-sample-frac") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: --score-sample-frac requires a fraction (e.g. 0.01)\n");
+                return -1;
+            }
+            config->score_sample_frac = strtod(argv[i], NULL);
+            if (config->score_sample_frac <= 0.0 || config->score_sample_frac > 1.0) {
+                fprintf(stderr, "Error: --score-sample-frac must be in (0,1]\n");
+                return -1;
+            }
+            printf("Score sample frac: %.4f (uniform)\n", config->score_sample_frac);
+        } else if (strcmp(argv[i], "--score-sample-n") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: --score-sample-n requires an argument (cap; 0=none)\n");
+                return -1;
+            }
+            config->score_sample_n = (uint32_t)strtoul(argv[i], NULL, 10);
+            printf("Score sample cap: %u\n", config->score_sample_n);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             pact_print_usage(argv[0]);
             return 1;
@@ -243,6 +315,20 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
             pact_print_usage(argv[0]);
             return -1;
         }
+    }
+
+    if (config->demotion_policy == DEMOTION_USERSPACE && demotion_margin_set) {
+        fprintf(stderr,
+                "Error: --demotion-margin applies only to kernel demotion "
+                "(Algorithm 2); incompatible with --demotion-policy userspace.\n");
+        return -1;
+    }
+    if (config->demotion_policy != DEMOTION_USERSPACE && fast_tier_frac_set) {
+        fprintf(stderr,
+                "Error: --fast-tier-frac applies only to --demotion-policy userspace "
+                "(got policy=%s).\n",
+                config->demotion_policy == DEMOTION_KERNEL_LRU ? "kernel" : "off");
+        return -1;
     }
 
     if (config->target_pid <= 0) {

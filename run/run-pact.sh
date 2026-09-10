@@ -59,17 +59,32 @@ bin_width="${bin_width:-1000.0}"
 #   ./run-pact.sh bc_urand_8t
 pc_class_weights="${pc_class_weights:-}"
 pc_class_map="${pc_class_map:-}"
-# Scoring policy for a fair A/B: pac (baseline) | pc (pure PC-class) | pac+pc.
+# Scoring policy for a fair A/B: pac (baseline) | freq (sampled remote-miss
+# frequency) | pc (pure PC-class) | pac+pc.
 # Empty = PACT default (pac+pc if PC files given, else pac).
 score_mode="${score_mode:-}"
+# kernel (default) | userspace (census + top-K) | off
+demotion_policy="${demotion_policy:-}"
+# Algorithm 2 m; only with demotion_policy=kernel (userspace rejects this flag)
+demotion_margin="${demotion_margin:-}"
+fast_tier_frac="${fast_tier_frac:-}"
+pac_pool_max="${pac_pool_max:-}"
+score_sample="${score_sample:-}"
+score_regions="${score_regions:-}"
+score_sample_frac="${score_sample_frac:-}"
+score_sample_n="${score_sample_n:-}"
 
 # --- Tier placement (paper methodology: first-touch, PACT is the placer) ---
 # The workload's memory is allocated FIRST-TOUCH (default NUMA policy): we
 # CPU-pin it but do NOT bind its memory to any node. The paper's allocation
 # policy is first-touch for application transparency (PACT decides placement
-# online, the application does nothing). PACT samples slow-tier accesses and
-# promotes the performance-critical pages to the fast tier, enabling kernel
-# demotion only when Algorithm 2's balance check calls for it.
+# online, the application does nothing). PACT samples accesses and promotes
+# critical pages to the fast tier.
+#
+# Demotion depends on demotion_policy → --demotion-policy:
+#   kernel     — Algorithm 2 toggles demotion_enabled (--demotion-margin)
+#   userspace  — census top-K (2MB / 500ms / 1GB/epoch; tune K via fast_tier_frac)
+#   off        — no demotion (except optional PEBS θ if PACT_PC_TARGET_FRAC>0)
 #
 # The fast/slow SPLIT comes from a physically small fast tier, NOT from
 # binding the workload's memory. Boot the machine with node 0's usable DRAM
@@ -163,16 +178,10 @@ clean_up() {
 
     if [ -n "${PACT_PID:-}" ]; then
         echo "  Killing PACT PID $PACT_PID"
-        # PACT runs under sudo, so a clean SIGINT (for its stats dump on exit)
-        # and the final kill both need sudo.
-        sudo kill -SIGINT "$PACT_PID" 2>/dev/null || kill -SIGINT "$PACT_PID" 2>/dev/null || true
-        sleep 2
+        # PACT runs under sudo. Kill only the exact background PID; avoid
+        # SIGINT and process-group signaling because the background command
+        # shares the harness's process group.
         sudo kill -KILL "$PACT_PID" 2>/dev/null || kill -KILL "$PACT_PID" 2>/dev/null || true
-        # Backstop: reap the real pact process (sudo's child) by killing PACT's
-        # process group, NOT `pkill -x pact` (which would kill every PACT on the
-        # machine, including a concurrent experiment).
-        pgid=$(ps -o pgid= -p "$PACT_PID" 2>/dev/null | tr -d ' ')
-        [ -n "$pgid" ] && sudo kill -KILL -- "-$pgid" 2>/dev/null || true
     fi
 
     # Reap the vmstat/numastat monitor loops. Kill each subshell AND its
@@ -258,7 +267,9 @@ echo "=== Phase 2: Starting monitoring ==="
 cat /proc/vmstat >"$OUTDIR/before_vmstat.log"
 
 touch "$OUTDIR/vmstat.txt"
-(while true; do
+(
+trap - EXIT INT TERM
+while true; do
     ts=$(date +%s)
     echo "$ts" >>"$OUTDIR/vmstat.txt"
     grep -E "pgdemote|pgpromote|pgmigrate|thp_migration|numa_pte_updates" /proc/vmstat >>"$OUTDIR/vmstat.txt"
@@ -330,7 +341,9 @@ echo "  Workload PID: $WORKLOAD_PID"
 
 # Start numastat monitoring now that we have the PID
 touch "$OUTDIR/numastat.log"
-(while true; do
+(
+trap - EXIT INT TERM
+while true; do
     ts=$(date +%s)
     numastat="$(numastat -p "$WORKLOAD_PID" 2>/dev/null | tail -n1 | awk '{print $2 "," $3}')"
     echo "$ts, $numastat" >>"$OUTDIR/numastat.log"
@@ -361,7 +374,7 @@ if [ "$enable_pact" = "true" ]; then
 PACT_PEBS_SAMPLES_CSV=$OUTDIR/pebs_samples.csv PACT_PEBS_SAMPLES_STRIDE=${pebs_stride:-20}"
         echo "  Page dumps ON: $OUTDIR/{migrations,pebs_samples}.csv"
     fi
-    PACT_CMD="sudo PACT_FAST_TIER_FRAC=${PACT_FAST_TIER_FRAC:-0} $pact_dump_env $PACT \
+    PACT_CMD="sudo PACT_PC_TARGET_FRAC=${PACT_PC_TARGET_FRAC:-${PACT_FAST_TIER_FRAC:-0}} $pact_dump_env $PACT \
         --workload $WORKLOAD_PID \
         --pebs-period $pebs_period \
         --max-migrations-per-cycle $migration_limit \
@@ -375,6 +388,30 @@ PACT_PEBS_SAMPLES_CSV=$OUTDIR/pebs_samples.csv PACT_PEBS_SAMPLES_STRIDE=${pebs_s
     fi
     if [ -n "$score_mode" ]; then
         PACT_CMD="$PACT_CMD --score-mode $score_mode"
+    fi
+    if [ -n "$demotion_policy" ]; then
+        PACT_CMD="$PACT_CMD --demotion-policy $demotion_policy"
+    fi
+    if [ -n "$demotion_margin" ]; then
+        PACT_CMD="$PACT_CMD --demotion-margin $demotion_margin"
+    fi
+    if [ -n "$fast_tier_frac" ]; then
+        PACT_CMD="$PACT_CMD --fast-tier-frac $fast_tier_frac"
+    fi
+    if [ -n "$pac_pool_max" ]; then
+        PACT_CMD="$PACT_CMD --pac-pool-max $pac_pool_max"
+    fi
+    if [ -n "$score_sample" ]; then
+        PACT_CMD="$PACT_CMD --score-sample $score_sample"
+    fi
+    if [ -n "$score_regions" ]; then
+        PACT_CMD="$PACT_CMD --score-regions $score_regions"
+    fi
+    if [ -n "$score_sample_frac" ]; then
+        PACT_CMD="$PACT_CMD --score-sample-frac $score_sample_frac"
+    fi
+    if [ -n "$score_sample_n" ]; then
+        PACT_CMD="$PACT_CMD --score-sample-n $score_sample_n"
     fi
 
     echo "  Executing: $PACT_CMD"

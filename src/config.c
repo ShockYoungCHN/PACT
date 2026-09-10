@@ -18,7 +18,11 @@ void pact_init_config(pact_config_t *config)
     config->cooling_interval_ms = PACT_DEFAULT_COOLING_INTERVAL_MS;
     config->adaptive_interval_ms = PACT_DEFAULT_ADAPTIVE_INTERVAL_MS;
     config->stats_interval_ms = PACT_DEFAULT_STATS_INTERVAL_MS;
+    config->census_interval_ms = PACT_DEFAULT_CENSUS_INTERVAL_MS;
     config->max_migrations_per_cycle = PACT_DEFAULT_MAX_MIGRATIONS_PER_CYCLE;
+    config->fast_tier_frac = PACT_DEFAULT_FAST_TIER_FRAC;
+    config->granule_bytes = PACT_DEFAULT_GRANULE_BYTES;
+    config->census_migrate_limit = PACT_DEFAULT_CENSUS_MIGRATE_LIMIT;
     config->demotion_margin = 0;
     config->enable_logging = false;
     config->log_file[0] = '\0';
@@ -43,5 +47,9 @@ void pact_init_config(pact_config_t *config)
 
     config->class_weights_path[0] = '\0';
     config->pc_class_map_path[0] = '\0';
+    config->score_sample_path[0] = '\0';
+    config->score_regions_path[0] = '\0';
+    config->score_sample_frac = 0.01;
+    config->score_sample_n = 0;
     config->score_mode = SCORE_MODE_AUTO;
 }

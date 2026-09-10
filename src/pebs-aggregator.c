@@ -63,6 +63,9 @@ typedef struct pebs_aggregator {
     /* Always-on diagnostic counters (cumulative across run) */
     uint64_t aggregation_cycles_total;      /* Total aggregation coroutine invocations */
     uint64_t aggregation_max_samples_cycle; /* High-water mark: max samples in one cycle */
+    uint64_t tier_from_dsrc_fast;
+    uint64_t tier_from_dsrc_slow;
+    uint64_t tier_from_pac_fallback;
 
     /* Per-cycle sample staging: every CPU's perf buffer is drained here
      * FIRST so the window's total sample count A_t is known before the
@@ -126,53 +129,26 @@ static inline void ring_copy(void *dst, const char *base, uint64_t off, size_t l
     }
 }
 
-/* Read PEBS events from one CPU. REMOTE_DRAM only. */
-static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_state,
-                                pebs_staged_sample_t *events, int max_events)
+/* Drain one PEBS ring. hw_tier is 0 for LOCAL_DRAM (0x01d3), 1 for REMOTE. */
+static int read_one_pebs_mmap(pebs_aggregator_t *agg, void *pebs_mmap,
+                              pebs_staged_sample_t *events, int max_events, uint8_t hw_tier)
 {
-    if (!cpu_state || cpu_state->fd_pebs < 0 || !cpu_state->pebs_mmap) {
+    if (!pebs_mmap || pebs_mmap == MAP_FAILED) {
         return 0;
     }
 
-    struct perf_event_mmap_page *perf_page = (struct perf_event_mmap_page *)cpu_state->pebs_mmap;
-
-    if (!perf_page) {
-        return 0;
-    }
-
-    /*
-     * perf ring-buffer consumer protocol (see tools/perf and
-     * Documentation/userspace-api/perf_ring_buffer.rst):
-     *   - data_head / data_tail are free-running ABSOLUTE byte offsets that
-     *     increase monotonically; they are NOT reduced modulo the buffer size.
-     *     Available bytes = data_head - data_tail (unsigned arithmetic).
-     *   - The buffer holds PERF_BUFFER_PAGES pages; index into it with
-     *     (offset % data_size). The mmap is sized (1 + PERF_BUFFER_PAGES)
-     *     pages in setup_pebs_event(), so this constant is authoritative.
-     *   - Read head, then issue an rmb() BEFORE reading the records it
-     *     published, so record payloads (written before head advanced) are
-     *     visible. Issue an mb() before writing data_tail back.
-     */
+    struct perf_event_mmap_page *perf_page = (struct perf_event_mmap_page *)pebs_mmap;
     const uint64_t data_size = (uint64_t)PERF_BUFFER_PAGES * PAGE_SIZE;
-    char *data = (char *)cpu_state->pebs_mmap + PAGE_SIZE; /* records follow the metadata page */
+    char *data = (char *)pebs_mmap + PAGE_SIZE;
 
     uint64_t head = perf_page->data_head;
     uint64_t tail = perf_page->data_tail;
-
-    /* Acquire: see record payloads published before this head value. */
     __sync_synchronize();
 
     if (head == tail) {
-        return 0; /* No new data */
+        return 0;
     }
 
-    /*
-     * The buffer is a single (non-mirrored) mapping, so a record can wrap the
-     * end of the buffer. Reassemble each record into a small linear scratch
-     * buffer before reading its fields, so a wrapping record is handled
-     * correctly instead of reading past the mapping. Our records are tiny
-     * (header + IP + TID + ADDR), so a fixed scratch is sufficient.
-     */
     int count = 0;
     while (tail < head && count < max_events) {
         uint64_t off = tail % data_size;
@@ -180,16 +156,10 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
         struct perf_event_header hdr;
         ring_copy(&hdr, data, off, sizeof(hdr), data_size);
         if (hdr.size < sizeof(hdr)) {
-            break; /* malformed/zero-size header: stop to avoid an infinite loop */
+            break;
         }
 
         if (hdr.type == PERF_RECORD_SAMPLE) {
-            /*
-             * Sample layout (ordered by sample_type bit position):
-             *   PERF_SAMPLE_IP:       { u64 ip; }
-             *   PERF_SAMPLE_TID:      { u32 pid, tid; }
-             *   PERF_SAMPLE_ADDR:     { u64 addr; }
-             */
             struct {
                 struct perf_event_header header;
                 uint64_t ip;
@@ -200,23 +170,45 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
             if (hdr.size >= sizeof(rec)) {
                 ring_copy(&rec, data, off, sizeof(rec), data_size);
                 if (is_target_pid(agg->pact_ctx, (pid_t)rec.pid)) {
-                    events[count].addr_enc = PEBS_ENCODE_ADDR_TIER(rec.addr, 1);
+                    events[count].addr_enc = PEBS_ENCODE_ADDR_TIER(rec.addr, hw_tier);
                     events[count].ip = rec.ip;
                     count++;
-                    agg->events_per_tier[1]++;
+                    agg->events_per_tier[hw_tier]++;
+                    if (hw_tier == 0) {
+                        agg->tier_from_dsrc_fast++;
+                    } else {
+                        agg->tier_from_dsrc_slow++;
+                    }
                 }
             }
         }
-
-        /* Advance by the raw record size (absolute counter, no modulo). */
         tail += hdr.size;
     }
 
-    /* Release: publish the consumed position only after reading the records. */
     __sync_synchronize();
     perf_page->data_tail = tail;
-
     return count;
+}
+
+/* Read PEBS events from one CPU (local + remote L3-miss-to-DRAM streams). */
+static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_state,
+                                pebs_staged_sample_t *events, int max_events)
+{
+    if (!cpu_state || max_events <= 0) {
+        return 0;
+    }
+    /* Split the batch so a busy local ring cannot starve remote (or vice versa). */
+    int half = max_events / 2;
+    if (half < 1) {
+        half = max_events;
+    }
+    int n = 0;
+    n += read_one_pebs_mmap(agg, cpu_state->pebs_mmap[0], events + n, half, 0);
+    n += read_one_pebs_mmap(agg, cpu_state->pebs_mmap[1], events + n, max_events - n, 1);
+    if (n < max_events) {
+        n += read_one_pebs_mmap(agg, cpu_state->pebs_mmap[0], events + n, max_events - n, 0);
+    }
+    return n;
 }
 
 /* Aggregate PEBS events from all CPUs and push directly to PAC update ring */
@@ -383,8 +375,7 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
         uint64_t page = addr & PAGE_MASK;
         uint32_t attributed;
         if (ctx->score_mode == SCORE_MODE_FREQ) {
-            /* Fair hotness baseline: this PEBS stream is already restricted
-             * to remote LLC misses, so each sample contributes one unit. */
+            /* Fair hotness baseline: one unit per sampled DRAM miss (local or remote). */
             attributed = 1;
         } else if (ctx->score_mode == SCORE_MODE_PC) {
             /* Pure PC-class: per-sample score = w_c(class(ip)); ignore the PAC
@@ -465,6 +456,10 @@ static void log_workload_pebs_stats(pact_context_t *ctx, pebs_aggregator_t *agg)
                         agg->lost_samples, 0, agg->dropped_events_workload);
     if (ctx->pc_class) {
         pc_class_log_stats(ctx->pc_class);
+    }
+    if ((agg->aggregation_cycles_total % 250) == 0) {
+        log_info("pebs_aggregator", "tier_pebs local=%lu remote=%lu", agg->tier_from_dsrc_fast,
+                 agg->tier_from_dsrc_slow);
     }
 }
 

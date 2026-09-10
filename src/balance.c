@@ -5,8 +5,8 @@
  *
  * Controls /sys/kernel/mm/numa/demotion_enabled from the migration thread
  * at ~1Hz: kernel LRU demotion stays enabled while
- * N_demoted < N_promoted + m, where m is the demotion aggressiveness
- * (--demotion-margin, default 0). Demotions are counted from the
+ * N_demoted < N_promoted + m, with m = --demotion-margin (default 0).
+ * Demotions are counted from the
  * system-wide /proc/vmstat pgdemote counters relative to a baseline taken
  * on the first check, so both sides of the inequality count this run's
  * pages.
@@ -59,6 +59,11 @@ static void write_demotion_enabled(const char *value)
         log_warning("write_demotion_enabled", "Failed to write '%s': %s", value, strerror(errno));
     }
     close(fd);
+}
+
+void set_kernel_demotion_enabled(int on)
+{
+    write_demotion_enabled(on ? "1" : "0");
 }
 
 void check_migration_balance(pact_context_t *pact)

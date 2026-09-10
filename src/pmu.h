@@ -88,11 +88,10 @@ typedef struct per_cpu_state {
     int cpu_id;
 
     perf_event_t leader; /* dummy group leader owning the perf mmap */
-    /* we don't need ids and values for pebs, no need to use perf_event_t for now */
-    int fd_pebs; /*  PEBS file descriptor */
-
+    /* 0 = LOCAL_DRAM 0x01d3 (fast), 1 = REMOTE_DRAM 0x02d3 (slow). */
+    int fd_pebs[2];
+    void *pebs_mmap[2];
     uint64_t pebs_sampling_period;
-    void *pebs_mmap; /*  PEBS buffer */
 } per_cpu_state_t;
 
 int validate_hardware_access(void);

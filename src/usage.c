@@ -53,13 +53,12 @@ void pact_print_usage(const char *prog_name)
     printf("\nPAC + migration tuning:\n");
     printf("  --pebs-period N                   PEBS sample period: 1 sample per N "
            "events (default 400).\n");
-    printf("  --max-migrations-per-cycle N      Pages promoted per cycle; higher = "
-           "faster\n");
-    printf("                                    convergence to the critical "
-           "(high-PAC) set (default 4096).\n");
+    printf("  --max-migrations-per-cycle N      Max 4K pages per numa_move_pages batch "
+           "(promote or demote; default 4096).\n");
     printf("  --bin-count N                     Number of PAC bins; the top bin is "
            "promoted\n");
-    printf("                                    (default 20).\n");
+    printf("                                    (default 20; unused for placement under "
+           "userspace demotion).\n");
     printf("  --bin-width W                     Initial PAC bin width; self-tunes at "
            "runtime (default 1000.0).\n");
     printf("  --cooling-alpha A                 PAC EWMA decay in [0,1]; 1.0 "
@@ -67,12 +66,21 @@ void pact_print_usage(const char *prog_name)
     printf("  --cooling-trigger-samples N       Samples before cooling kicks in "
            "(default 200000).\n");
     printf("  --pac-pool-max N                  Max tracked pages "
-           "(default 2097152).\n");
-    printf("  --demotion-margin M               Keep kernel demotion on while "
-           "demoted <\n");
-    printf("                                    promoted + M pages; larger M = more "
-           "proactive\n");
-    printf("                                    fast-tier headroom (default 0).\n");
+           "(default 6291456 ≈20GB of 4K; 0 = that default).\n");
+    printf("  --demotion-margin M               Kernel only (Algorithm 2): keep demotion "
+           "on while\n");
+    printf("                                    demoted < promoted + M pages; larger M = "
+           "more headroom\n");
+    printf("                                    (default 0). Incompatible with "
+           "--demotion-policy userspace.\n");
+    printf("  --demotion-policy P               kernel = LRU + Algorithm 2 (default);\n");
+    printf("                                    userspace = census top-K by score "
+           "(2MB granules, 500ms,\n");
+    printf("                                    1GB/epoch migrate cap); "
+           "off = no demotion.\n");
+    printf("  --fast-tier-frac F                Userspace only: keep top F of node0 "
+           "by score (default 0.90).\n");
+    printf("                                    Not env PACT_PC_TARGET_FRAC (PEBS θ).\n");
     printf("  --class-weights PATH              Calibrated class weights JSON "
            "(with --pc-class-map).\n");
     printf("  --pc-class-map PATH               Offline PC offset→class map "
@@ -83,14 +91,25 @@ void pact_print_usage(const char *prog_name)
            "(PIE-safe).\n");
     printf("  --score-mode MODE                 Page-criticality scoring policy "
            "(fair A/B):\n");
-    printf("                                    pac    = PACT PAC only (baseline; "
-           "default)\n");
+    printf("                                    MODE=pac|freq|pc|pac+pc (see docs).\n");
+    printf("                                    pac    = PACT PAC only (baseline;\n");
+    printf("                                             default if no PC files /\n");
+    printf("                                             explicit --score-mode)\n");
     printf("                                    freq   = sampled remote-miss "
            "frequency (score = 1 per sample)\n");
     printf("                                    pc     = pure PC-class "
            "(score = w_c; needs both files)\n");
     printf("                                    pac+pc = PAC x w_c "
-           "(default when both files given)\n");
+           "(default when both PC files given\n");
+    printf("                                             and --score-mode omitted)\n");
+    printf("  --score-sample PATH               Debug: append uniform page-score sample CSV "
+           "each stats tick.\n");
+    printf("  --score-regions PATH              Debug: name lo_hex hi_hex VA bands for "
+           "CSV region column.\n");
+    printf("  --score-sample-frac F             Debug: keep fraction F of table "
+           "(default 0.01 = 1%%, systematic).\n");
+    printf("  --score-sample-n N                Debug: optional hard cap on rows/dump "
+           "(0 = none).\n");
 
     printf("\nTiming (milliseconds):\n");
     printf("  --sampling-interval MS            Sampling cadence (default 20).\n");

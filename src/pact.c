@@ -36,8 +36,10 @@
 #include "perf.h"
 #include "stats-coro.h"
 #include "cooling.h"
+#include "census.h"
 #include "utils.h"
 #include "pc_class.h"
+#include "score_sample.h"
 
 /* layout invariants — failures would silently break NMI-shared state,
  * pool sizing math, or ring-buffer cache-line guarantees. */
@@ -213,9 +215,8 @@ static void on_repromote_to_fast(pact_context_t *pact, pac_metadata_t *meta)
     meta->promoted_by_other = true;
 }
 
-/* Demotion: page just landed on slow tier. If PACT had promoted it, fast-
- * path re-enqueue (temporal locality — recently-hot tends to stay hot).
- * Account redemotion category. */
+/* Demotion observed (PEBS sample origin or migrate result): account
+ * redemotion category. Does not enqueue a migrate by itself. */
 static void on_redemote_to_slow(pact_context_t *pact, pac_metadata_t *meta)
 {
     if (!(meta->sampled_on_fast || meta->promoted_by_pact || meta->promoted_by_other)) {
@@ -275,14 +276,19 @@ static pac_metadata_t *create_pac_entry(pact_context_t *pact, pac_table_t *table
 }
 
 /* Apply this sample to an existing PAC entry: bump PAC value / access count,
- * handle tier transitions, and stamp the per-tier "sampled" flags. */
+ * handle tier transitions, and stamp the per-tier "sampled" flags.
+ *
+ * `tier` here is PEBS event origin (local=0 / remote=1), NOT necessarily the
+ * physical NUMA node. Under DEMOTION_USERSPACE, census + move_pages own
+ * meta->tier (placement); overwriting it from PEBS would make
+ * mig_add_entry_to_batch silently drop enqueued moves. Kernel/off still
+ * learn external demotes via PEBS and may update meta->tier. */
 static inline void apply_sample_to_meta(pact_context_t *pact, pac_metadata_t *meta, uint64_t stalls,
                                         uint8_t tier)
 {
     meta->pac_value += stalls;
     meta->access_count += 1;
-
-    if (tier != meta->tier) {
+    if (tier != meta->tier && pact->demotion_policy != DEMOTION_USERSPACE) {
         handle_tier_change(pact, meta, tier);
         update_tier_with_pingpong_detection(pact, meta, tier);
     }
@@ -293,12 +299,6 @@ static inline void apply_sample_to_meta(pact_context_t *pact, pac_metadata_t *me
         meta->sampled_on_slow = 1;
         meta->sampled_on_fast = 0;
     }
-}
-
-/* Per-sample reservoir update (Algorithm 3). */
-static inline void update_sample_reservoir(reservoir_t *res, pac_metadata_t *meta)
-{
-    reservoir_add_sample(res, (double)meta->pac_value);
 }
 
 /* Promotion-queue gating decision.
@@ -324,6 +324,10 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
     if (k != kh_end(table)) {
         meta = kh_val(table, k);
     } else {
+        /* Seed tier from this PEBS sample (local/remote). Under userspace,
+         * later samples do not overwrite (apply_sample_to_meta); census
+         * enqueue skips 4K pages whose known tier disagrees with the 2MB
+         * majority "from" node — that is the 4K-vs-granule tension fix. */
         meta = create_pac_entry(pact, table, page_addr, tier, pid);
         if (!meta) {
             return;
@@ -353,7 +357,14 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
     log_pac_update(pact, "update_pac_entry", pact->workload ? 0 : -1, page_addr, meta->pac_value,
                    tier_str, bin_index);
 
-    reservoir_add_sample(res, pv);   /* was update_sample_reservoir(res, meta); now pc-log-aware */
+    reservoir_add_sample(res, pv);
+
+    /* Userspace census owns placement (promote and demote). PEBS only scores. */
+    if (pact->demotion_policy == DEMOTION_USERSPACE) {
+        pact->workload->stats.avg_pac =
+            (pact->workload->stats.avg_pac * 15 + meta->pac_value) >> 4;
+        return;
+    }
 
     /* Migration decision. Two paths, both push to the SPSC migration ring from THIS
      * (aggregator) thread — the sole producer, so pushing demotes here is race-free. */
@@ -397,6 +408,35 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
     pact->workload->stats.avg_pac = (pact->workload->stats.avg_pac * 15 + meta->pac_value) >> 4;
 }
 
+bool pact_enqueue_move(pact_context_t *pact, pac_metadata_t *meta, uint64_t page_addr,
+                       int target_node)
+{
+    if (!pact || !pact->workload || !pact->workload->migration_ring) {
+        return false;
+    }
+    if (meta && meta->migrating) {
+        return false;
+    }
+    if (meta) {
+        meta->migrating = true;
+    }
+    migration_entry_t entry = {
+        .meta = meta,
+        .page_addr = page_addr & PAGE_MASK,
+        .target_node = target_node,
+    };
+    if (!ring_buffer_migration_entry_push(pact->workload->migration_ring, entry)) {
+        if (meta) {
+            meta->migrating = false;
+        }
+        return false;
+    }
+    if (target_node == 0) {
+        atomic_inc_relaxed(&pact->workload->stats.promotion_attempts);
+    }
+    return true;
+}
+
 /* Migration Thread: busy-waits on the workload's migration ring and
  * dispatches numa_move_pages. */
 
@@ -406,7 +446,7 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
  *   timestamp_ms,va,target_node,op   (op = promote|demote)
  * Zero overhead when the env var is unset. Written only from the single
  * migration path below (one writer), so no lock is needed. NOTE: only captures
- * PACT's userspace numa_move_pages migrations (promotions); kernel-LRU
+ * PACT's userspace numa_move_pages migrations (promote and demote). kernel-LRU
  * demotions do not pass through here. */
 static FILE *g_mig_log_fp = NULL;
 static bool g_mig_log_done = false;
@@ -448,8 +488,8 @@ static inline void mig_log_event(uint64_t va, int target_node, const char *op)
 }
 
 /* Process per-page numa_move_pages results — must be thread-safe vs main thread.
- * Every entry in the migration ring is a promotion (target_node=0); demotion
- * is handled by the kernel's demotion_enabled toggle, not numa_move_pages. */
+ * Ring entries are promotions (target_node=0) or userspace demotions
+ * (target_node=1). kernel-LRU demotions still do not pass through here. */
 static void process_migration_batch_results(pact_context_t *ctx, pac_metadata_t **metas,
                                             int *status, int count, long result, int errno_val)
 {
@@ -466,7 +506,17 @@ static void process_migration_batch_results(pact_context_t *ctx, pac_metadata_t 
     for (int i = 0; i < count; i++) {
         pac_metadata_t *meta = metas[i];
         if (!meta) {
-            continue; /* synthetic neighbor — no metadata to update */
+            /* Granule neighbor: count the landing node, no PAC metadata. */
+            if (status[i] >= 0) {
+                if (status[i] == 0) {
+                    atomic_inc_relaxed(&ctx->workload->stats.promotion_successes);
+                    promotion_success++;
+                } else if (status[i] == 1) {
+                    atomic_inc_relaxed(&ctx->workload->stats.pact_demotions);
+                    demotion_success++;
+                }
+            }
+            continue;
         }
 
         if (status[i] < 0) {
@@ -571,17 +621,34 @@ static void mig_dispatch_batch(pact_context_t *ctx, pid_t target_pid, void **pag
 }
 
 /* Add one entry to the in-flight batch arrays. Returns false if the page
- * is already at its target tier (kernel migrated it between enqueue and
- * dequeue) — caller must not advance batch_count. */
+ * is already at its target tier (stale enqueue) — caller must not advance
+ * batch_count. Under userspace census, skip the from-tier gate: placement
+ * is decided by census + move_pages (PEBS tier can disagree inside a 2MB
+ * granule). */
 static bool mig_add_entry_to_batch(const migration_entry_t *entry, void **pages, int *nodes,
-                                   pac_metadata_t **metas, int *status, int idx)
+                                   pac_metadata_t **metas, int *status, int idx,
+                                   demotion_policy_t policy)
 {
-    int expected_from_tier = (entry->target_node == 0) ? 1 : 0;
-    if (entry->meta->tier != expected_from_tier) {
-        entry->meta->migrating = false;
+    uint64_t addr = entry->page_addr;
+    if (entry->meta) {
+        if (policy != DEMOTION_USERSPACE) {
+            uint8_t cur = entry->meta->tier;
+            if (cur == 0 || cur == 1) {
+                int expected_from_tier = (entry->target_node == 0) ? 1 : 0;
+                if (cur != expected_from_tier) {
+                    entry->meta->migrating = false;
+                    return false;
+                }
+            }
+        }
+        if (!addr) {
+            addr = entry->meta->page_addr;
+        }
+    }
+    if (!addr) {
         return false;
     }
-    pages[idx] = (void *)entry->meta->page_addr;
+    pages[idx] = (void *)addr;
     nodes[idx] = entry->target_node;
     metas[idx] = entry->meta;
     status[idx] = -1;
@@ -602,7 +669,8 @@ static int mig_drain_workload_ring(pact_context_t *ctx, void **pages, int *nodes
         int batch_count = 0;
         migration_entry_t entry;
         while (batch_count < batch_limit && ring_buffer_migration_entry_pop(ring, &entry)) {
-            if (mig_add_entry_to_batch(&entry, pages, nodes, metas, status, batch_count)) {
+            if (mig_add_entry_to_batch(&entry, pages, nodes, metas, status, batch_count,
+                                       ctx->demotion_policy)) {
                 batch_count++;
             }
         }
@@ -645,7 +713,7 @@ static void *migration_thread_fn(void *arg)
     uint64_t next_balance_tsc = rdtsc() + balance_interval_tsc;
 
     while (ctx->migration_thread_running) {
-        if (rdtsc() >= next_balance_tsc) {
+        if (ctx->demotion_policy == DEMOTION_KERNEL_LRU && rdtsc() >= next_balance_tsc) {
             check_migration_balance(ctx);
             next_balance_tsc = rdtsc() + balance_interval_tsc;
         }
@@ -845,7 +913,13 @@ static int init_coroutines(pact_context_t *ctx)
     if (create_coroutine(ctx, CORO_TYPE_STATS, "stats", stats_coroutine) < 0) {
         return -1;
     }
-    log_info("init_coroutines", "Initialized 4 coroutines for single-threaded event loop");
+    if (ctx->demotion_policy == DEMOTION_USERSPACE) {
+        if (create_coroutine(ctx, CORO_TYPE_CENSUS, "census", census_coroutine) < 0) {
+            return -1;
+        }
+        log_info("init_coroutines", "Census coroutine created (userspace demotion)");
+    }
+    log_info("init_coroutines", "Initialized coroutines for single-threaded event loop");
     return 0;
 }
 
@@ -878,6 +952,11 @@ static void event_loop_log_config(pact_context_t *pact)
     log_info("run_pact_event_loop", "  Cooling interval: %u ms", pact->cooling_interval_ms);
     log_info("run_pact_event_loop", "  Adaptive interval: %u ms", pact->adaptive_interval_ms);
     log_info("run_pact_event_loop", "  Stats interval: %u ms", pact->stats_interval_ms);
+    log_info("run_pact_event_loop", "  Census interval: %u ms", pact->census_interval_ms);
+    log_info("run_pact_event_loop", "  Demotion policy: %s",
+             pact->demotion_policy == DEMOTION_USERSPACE
+                 ? "userspace"
+                 : pact->demotion_policy == DEMOTION_KERNEL_LRU ? "kernel" : "off");
     log_info("run_pact_event_loop", "  Max migrations per cycle: %u",
              pact->max_migrations_per_cycle);
 }
@@ -909,6 +988,9 @@ static uint64_t coro_tick_account(pact_context_t *pact, coro_type_t type)
  * resume, log elapsed, and report errors. Returns true if the tick fired. */
 static bool tick_coroutine(pact_context_t *pact, uint64_t now, coro_type_t type)
 {
+    if (!pact->coroutines[type]) {
+        return false;
+    }
     struct coro_timing *t = &pact->timing[type];
     if (now < t->next_tsc) {
         return false;
@@ -975,6 +1057,10 @@ static void run_pact_event_loop(pact_context_t *pact)
             total_yields++;
             did_work = true;
         }
+        if (tick_coroutine(pact, now, CORO_TYPE_CENSUS)) {
+            total_yields++;
+            did_work = true;
+        }
 
         check_targets_alive(pact, now);
 
@@ -1031,14 +1117,18 @@ static void init_workload_binning(pact_context_t *pact)
 {
     pact->workload->binning->bin_width = pact->bin_width;
     pact->workload->binning->bin_count = pact->bin_count;
-    /* pc capacity-aware mode: target fast-tier fraction (top-frac by score). 0 = off.
-     * θ = the (1-frac) percentile of the score distribution, computed each stats interval —
-     * stable and units-free (fraction of the distribution, not absolute page count). */
-    const char *frac = getenv("PACT_FAST_TIER_FRAC");
+    /* PC PEBS capacity-aware θ (NOT census --fast-tier-frac). Env:
+     * PACT_PC_TARGET_FRAC (preferred) or legacy PACT_FAST_TIER_FRAC. 0 = off.
+     * θ = (1-frac) percentile of the score distribution each stats interval. */
+    const char *frac = getenv("PACT_PC_TARGET_FRAC");
+    if (!frac || !*frac) {
+        frac = getenv("PACT_FAST_TIER_FRAC"); /* legacy alias */
+    }
     pact->workload->binning->pc_target_frac = (frac && *frac) ? strtod(frac, 0) : 0.0;
     pact->workload->binning->pc_threshold = 1e18; /* promote-nothing until first percentile calc */
     if (pact->workload->binning->pc_target_frac > 0.0) {
-        log_info("init_workload_binning", "pc capacity-aware mode: target_frac=%.3f",
+        log_info("init_workload_binning",
+                 "pc PEBS capacity-aware mode: pc_target_frac=%.3f (not census --fast-tier-frac)",
                  pact->workload->binning->pc_target_frac);
     }
 }
@@ -1068,15 +1158,16 @@ static void init_pac_update_ring(pact_context_t *pact)
 }
 
 /* Initialize PAC metadata object pool. Caps entries to prevent OOM at
- * aggressive PEBS periods; 2M × 128B = ~256 MB fallback. */
+ * aggressive PEBS periods; default covers ~20GB of 4K pages. */
 static void init_pac_metadata_pool(pact_context_t *pact)
 {
     pact->pac_metadata_pool = pool_create(sizeof(pac_metadata_t), 1000, 500, false);
     if (!pact->pac_metadata_pool) {
         log_error("pact_init", "Failed to initialize PAC metadata pool");
     }
+    /* 0 means "use default", not unlimited (CLI text used to say otherwise). */
     if (pact->max_pac_entries == 0) {
-        pact->max_pac_entries = 2UL * 1024 * 1024;
+        pact->max_pac_entries = PACT_DEFAULT_PAC_POOL_MAX;
     }
     log_info("pact_init", "PAC metadata pool: max_entries=%zu", pact->max_pac_entries);
 }
@@ -1104,9 +1195,20 @@ static void pact_init(pact_context_t *pact)
     if (pact->demotion_policy == DEMOTION_KERNEL_LRU) {
         pact->demotion_baseline = read_migration_stats("pgdemote_kswapd pgdemote_direct");
         pact->workload->stats.last_demotions_successes = pact->demotion_baseline;
+    } else if (pact->demotion_policy == DEMOTION_USERSPACE) {
+        if (census_init(pact) != 0) {
+            log_error("pact_init", "census_init failed; disabling demotion "
+                                   "(and forcing demotion_enabled=0)");
+            pact->demotion_policy = DEMOTION_DISABLED;
+            /* census_init only turns demotion off on the success path; do it
+             * here so a failed userspace setup cannot leave kernel demotion on
+             * with neither Algorithm 2 nor census controlling it. */
+            set_kernel_demotion_enabled(0);
+        }
+    } else {
+        set_kernel_demotion_enabled(0);
     }
 }
-
 /* Cleanup */
 static void destroy_traces(pact_context_t *pact)
 {
@@ -1148,10 +1250,12 @@ static void destroy_per_cpu_pebs(pact_context_t *pact)
 {
     for (int cpu = 0; cpu < pact->nr_all_cpus; cpu++) {
         per_cpu_state_t *cs = &pact->cpu_states[cpu];
-        if (cs->pebs_mmap && cs->pebs_mmap != MAP_FAILED) {
-            munmap(cs->pebs_mmap, (1 + PERF_BUFFER_PAGES) * PAGE_SIZE);
+        for (int t = 0; t < 2; t++) {
+            if (cs->pebs_mmap[t] && cs->pebs_mmap[t] != MAP_FAILED) {
+                munmap(cs->pebs_mmap[t], (1 + PERF_BUFFER_PAGES) * PAGE_SIZE);
+            }
+            safe_close(cs->fd_pebs[t], "pact_destroy");
         }
-        safe_close(cs->fd_pebs, "pact_destroy");
         safe_close(cs->leader.fd, "pact_destroy"); /* per-CPU dummy group leader */
     }
     free(pact->cpu_states);
@@ -1220,6 +1324,8 @@ void pact_destroy(pact_context_t *pact)
     destroy_per_cpu_pebs(pact);
     destroy_per_workload_perf(pact);
     destroy_per_workload_data(pact);
+    census_destroy(pact);
+    score_sample_destroy(pact);
     free(pact->workload);
     pact->workload = NULL;
     free(pact->all_cpus);
@@ -1413,7 +1519,11 @@ static void copy_policy_and_intervals(pact_context_t *pact, const pact_config_t 
     pact->cooling_interval_ms = config->cooling_interval_ms;
     pact->adaptive_interval_ms = config->adaptive_interval_ms;
     pact->stats_interval_ms = config->stats_interval_ms;
+    pact->census_interval_ms = config->census_interval_ms;
     pact->max_migrations_per_cycle = config->max_migrations_per_cycle;
+    pact->fast_tier_frac = config->fast_tier_frac;
+    pact->granule_bytes = config->granule_bytes;
+    pact->census_migrate_limit = config->census_migrate_limit;
     pact->demotion_margin = config->demotion_margin;
     pact->enable_logging = config->enable_logging;
 }
@@ -1435,6 +1545,10 @@ static int initialize_pact_context(pact_context_t *pact, const pact_config_t *co
 
     copy_policy_and_intervals(pact, config);
     init_migration_and_optimizations(pact, config);
+    if (score_sample_init(pact, config->score_sample_path, config->score_regions_path,
+                          config->score_sample_frac, config->score_sample_n) < 0) {
+        log_warning("initialize_pact_context", "score sample init failed (continuing)");
+    }
 
     if (config->enable_logging) {
         init_logging_wrapper(pact, config->log_format, config);

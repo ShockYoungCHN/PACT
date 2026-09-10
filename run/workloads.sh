@@ -44,7 +44,7 @@ bc_kron_8t_pname="bc"
 bc_kron_8t_rss=20000
 bc_kron_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/kron.sg"
 bc_kron_8t_omp_threads=8
-bc_kron_8t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/kron.sg -i4 -n4"
+bc_kron_8t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/kron.sg -i4 -n5"
 
 # --- bc_kron_4t : same graph/RSS, 4 threads on CPUs 2-5 (half the cores).
 bc_kron_4t_pname="bc"
@@ -59,7 +59,14 @@ bc_urand_8t_pname="bc"
 bc_urand_8t_rss=20000
 bc_urand_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/urand.sg"
 bc_urand_8t_omp_threads=8
-bc_urand_8t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/urand.sg -i4 -n4"
+bc_urand_8t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/urand.sg -i4 -n5"
+
+# --- bc_urand_n2 : same as bc_urand_8t but -n2 for fast iteration
+bc_urand_n2_pname="bc"
+bc_urand_n2_rss=20000
+bc_urand_n2_vmtouch_file="${GAPBS_GRAPH_DIR}/urand.sg"
+bc_urand_n2_omp_threads=8
+bc_urand_n2_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/urand.sg -i4 -n2"
 
 # --- bc_urand_log : identical to bc_urand_8t but -l (per-source phase timing:
 #     'b'=forward PBFS [atomic/barrier-bound], 'p'=backward accum [gather-bound])

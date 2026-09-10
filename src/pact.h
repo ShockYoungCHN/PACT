@@ -58,7 +58,7 @@ typedef struct pac_metadata {
     uint64_t pac_value;    /* Accumulated PAC score */
     uint32_t access_count; /* Access frequency */
 
-    _Atomic uint8_t tier;              /* Current memory tier */
+    _Atomic uint8_t tier;              /* 0=fast, 1=slow, PAC_TIER_UNKNOWN=unset */
     _Atomic uint8_t prev_tier;         /* Previous tier (ping-pong detection) */
     _Atomic uint8_t migrating;         /* Migration in progress */
     _Atomic uint8_t promoted_by_pact;  /* Promoted by PACT */
@@ -69,6 +69,9 @@ typedef struct pac_metadata {
     _Atomic uint8_t sampled_on_slow;   /* Sampled on slow tier */
 } pac_metadata_t;
 
+/* Under DEMOTION_USERSPACE, placement is migrate-owned; PEBS must not seed tier. */
+#define PAC_TIER_UNKNOWN ((uint8_t)0xFF)
+
 /* Hash map type declarations - must be here for khash_t(pac) to work */
 KHASHL_MAP_INIT(KH_LOCAL, pac_table_t, pac_table, uint64_t, pac_metadata_t *, kh_hash_uint64,
                 kh_eq_generic)
@@ -77,6 +80,7 @@ KHASHL_MAP_INIT(KH_LOCAL, pac_table_t, pac_table, uint64_t, pac_metadata_t *, kh
 typedef enum {
     DEMOTION_DISABLED = 0,   /* Disable demotion entirely */
     DEMOTION_KERNEL_LRU = 1, /* Use the kernel's LRU-based demotion (default) */
+    DEMOTION_USERSPACE = 2,  /* Census + top-K + demote-first (kernel demotion off) */
 } demotion_policy_t;
 
 /* Coroutine types */
@@ -85,6 +89,7 @@ typedef enum {
     CORO_TYPE_PAC,     /* adaptive */
     CORO_TYPE_COOLING, /* cooling */
     CORO_TYPE_STATS,   /* stats */
+    CORO_TYPE_CENSUS,  /* userspace top-K placement */
     CORO_TYPE_MAX
 } coro_type_t;
 
@@ -93,7 +98,8 @@ typedef enum {
  * Passed through ring buffer from main thread to migration thread
  */
 typedef struct migration_entry {
-    pac_metadata_t *meta; /* Page metadata pointer (contains pid, page_addr) */
+    pac_metadata_t *meta; /* Optional; NULL for granule neighbor 4K pages */
+    uint64_t page_addr;   /* 4K virtual address to move */
     int target_node;      /* Target NUMA node (0=fast, 1=slow) */
 } migration_entry_t;
 
@@ -166,7 +172,8 @@ typedef struct {
      * demotion (the lever PACT lacks; its demotion is kernel-LRU). pc mode only. */
     double pc_threshold;   /* θ = the (1 - pc_target_frac) percentile of the score dist,
                             * recomputed each stats interval (stable, no feedback oscillation) */
-    double pc_target_frac; /* target fast-tier fraction (top-frac by score); 0 = feature off */
+    double pc_target_frac; /* PEBS path only (PACT_PC_TARGET_FRAC): target top-frac by score;
+                            * 0 = off. Not census --fast-tier-frac. */
 } binning_state_t;
 
 /* Comprehensive statistics structure */
@@ -234,6 +241,13 @@ typedef struct {
     /* Pool capacity tracking */
     uint64_t pool_alloc_skipped; /* Pages skipped because PAC metadata pool is full */
     uint64_t pool_warn_last_tsc; /* TSC of last "pool full" log warning (rate-limit) */
+
+    /* Userspace census (DEMOTION_USERSPACE). */
+    uint64_t census_epochs;
+    uint64_t census_tracked;
+    uint64_t census_k;
+    uint64_t census_enqueued_demote;
+    uint64_t census_enqueued_promote;
 } pact_stats_t;
 
 /* khash for PAC table defined in pact_minicoro.h */
@@ -345,6 +359,7 @@ struct pact_context {
     uint32_t cooling_interval_ms;
     uint32_t adaptive_interval_ms;
     uint32_t stats_interval_ms;
+    uint32_t census_interval_ms;
 
     /* PEBS sampling period */
     uint64_t pebs_sampling_period;
@@ -360,6 +375,13 @@ struct pact_context {
     /* Startup snapshot of the cumulative /proc/vmstat pgdemote counters;
      * balance.c counts this run's demotions relative to it. */
     uint64_t demotion_baseline;
+
+    /* Userspace top-K: keep this fraction of node0 (default 0.90). */
+    double fast_tier_frac;
+    uint64_t granule_bytes;         /* ranking / migrate granule (default 2MB) */
+    uint32_t census_migrate_limit;  /* 4K pages enqueued per census epoch */
+    struct census_state *census;
+    struct score_sample_state *score_sample; /* optional debug CDF dump */
 
     /* Cooling factor + trigger (Algorithm 1 α-decay). */
     double cooling_alpha;             /* 1.0 = no cooling (default) */
@@ -384,7 +406,7 @@ struct pact_context {
 
     /* ===== Memory Pools ===== */
     object_pool *pac_metadata_pool; /* Object pool for metadata */
-    size_t max_pac_entries;         /* Cap on PAC metadata entries (0 = unlimited) */
+    size_t max_pac_entries;         /* Cap on PAC metadata entries (0 → default at init) */
 
     /* ===== Control Flags ===== */
     volatile bool running;
@@ -427,6 +449,8 @@ static inline uint32_t pact_coro_interval_ms(const pact_context_t *ctx, coro_typ
         return ctx->cooling_interval_ms;
     case CORO_TYPE_STATS:
         return ctx->stats_interval_ms;
+    case CORO_TYPE_CENSUS:
+        return ctx->census_interval_ms;
     default:
         return 0;
     }
@@ -445,9 +469,17 @@ static inline const char *pact_coro_name(coro_type_t type)
         return "Cooling";
     case CORO_TYPE_STATS:
         return "Stats";
+    case CORO_TYPE_CENSUS:
+        return "Census";
     default:
         return "?";
     }
 }
+
+/* Enqueue one 4K move. Sole producer is the event-loop thread.
+ * meta may be NULL (granule neighbor). Returns false if the ring is full
+ * or the page is already in flight. */
+bool pact_enqueue_move(pact_context_t *pact, pac_metadata_t *meta, uint64_t page_addr,
+                       int target_node);
 
 #endif /* PACT_H */

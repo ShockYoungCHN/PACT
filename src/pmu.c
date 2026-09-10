@@ -481,8 +481,8 @@ int setup_dummy_leader_event(perf_event_t *perf_event, pid_t pid, int cpu)
     return 0;
 }
 
-/* Setup PEBS for LLC miss sampling, for the target CPUs */
-int setup_pebs_event(per_cpu_state_t *cpu_state, pid_t pid, int cpu)
+/* Open one PEBS sampling event (LOCAL=0 or REMOTE=1) and mmap its ring. */
+static int setup_one_pebs_event(per_cpu_state_t *cpu_state, pid_t pid, int cpu, int tier)
 {
     struct perf_event_attr pe;
     memset(&pe, 0, sizeof(pe));
@@ -490,46 +490,66 @@ int setup_pebs_event(per_cpu_state_t *cpu_state, pid_t pid, int cpu)
     pe.type = PERF_TYPE_RAW;
     pe.size = sizeof(pe);
     pe.sample_period = cpu_state->pebs_sampling_period;
-    /* Bit order in the sample payload: IP, then TID, then ADDR. */
     pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_ADDR;
     pe.exclude_kernel = 1;
     pe.exclude_hv = 1;
     pe.exclude_idle = 1;
     pe.mmap = 1;
-    pe.precise_ip = 2; /* Request PEBS */
+    pe.precise_ip = 2;
     pe.inherit = 1;
     pe.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING |
                      PERF_FORMAT_GROUP | PERF_FORMAT_ID;
+    pe.config = (tier == 0) ? g_pmu_platform.event_llc_miss_local
+                            : g_pmu_platform.event_llc_miss_remote;
 
-    /* MEM_LOAD_L3_MISS_RETIRED.REMOTE_DRAM — slow tier only */
-    pe.config = g_pmu_platform.event_llc_miss_remote;
-
-    cpu_state->fd_pebs = perf_event_open(&pe, pid, cpu, cpu_state->leader.fd, 0);
-    if (cpu_state->fd_pebs < 0) {
+    cpu_state->fd_pebs[tier] = perf_event_open(&pe, pid, cpu, cpu_state->leader.fd, 0);
+    if (cpu_state->fd_pebs[tier] < 0) {
         if (errno == EACCES) {
             log_error("setup_pebs_sampling",
                       "Permission denied for PEBS - run as root or adjust perf_event_paranoid");
         } else if (errno == ENODEV) {
             log_error("setup_pebs_sampling", "PEBS not supported on this hardware");
         } else {
-            log_error("setup_pebs_sampling", "Failed to open PEBS event");
+            log_error("setup_pebs_sampling", "Failed to open PEBS %s (0x%llx): %s",
+                      tier == 0 ? "LOCAL_DRAM" : "REMOTE_DRAM",
+                      (unsigned long long)pe.config, strerror(errno));
         }
         return -1;
     }
-    log_info("setup_pebs_sampling", "CPU [%d] PEBS event fd:%d (REMOTE_DRAM)", cpu,
-             cpu_state->fd_pebs);
 
-    /* Map the buffer */
     size_t mmap_size = (1 + PERF_BUFFER_PAGES) * PAGE_SIZE;
-    cpu_state->pebs_mmap =
-        mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, cpu_state->fd_pebs, 0);
-    if (cpu_state->pebs_mmap == MAP_FAILED) {
-        log_error("setup_pebs_sampling", "Failed to mmap PEBS buffer");
-        safe_close(cpu_state->fd_pebs, "setup_pebs_sampling");
-        cpu_state->fd_pebs = -1;
+    cpu_state->pebs_mmap[tier] =
+        mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, cpu_state->fd_pebs[tier], 0);
+    if (cpu_state->pebs_mmap[tier] == MAP_FAILED) {
+        log_error("setup_pebs_sampling", "Failed to mmap PEBS %s buffer",
+                  tier == 0 ? "LOCAL" : "REMOTE");
+        safe_close(cpu_state->fd_pebs[tier], "setup_pebs_sampling");
+        cpu_state->fd_pebs[tier] = -1;
+        cpu_state->pebs_mmap[tier] = NULL;
         return -1;
     }
+    return 0;
+}
 
+/* Setup PEBS: separate LOCAL and REMOTE L3-miss streams. Sample tier is
+ * which fd overflowed — DATA_SRC on the OR'd 0x03d3 event is NA on SKX. */
+int setup_pebs_event(per_cpu_state_t *cpu_state, pid_t pid, int cpu)
+{
+    if (setup_one_pebs_event(cpu_state, pid, cpu, 0) < 0) {
+        return -1;
+    }
+    if (setup_one_pebs_event(cpu_state, pid, cpu, 1) < 0) {
+        if (cpu_state->pebs_mmap[0] && cpu_state->pebs_mmap[0] != MAP_FAILED) {
+            munmap(cpu_state->pebs_mmap[0], (1 + PERF_BUFFER_PAGES) * PAGE_SIZE);
+        }
+        safe_close(cpu_state->fd_pebs[0], "setup_pebs_sampling");
+        cpu_state->fd_pebs[0] = -1;
+        cpu_state->pebs_mmap[0] = NULL;
+        return -1;
+    }
+    log_info("setup_pebs_sampling",
+             "CPU [%d] PEBS local fd:%d (0x01d3) remote fd:%d (0x02d3)", cpu,
+             cpu_state->fd_pebs[0], cpu_state->fd_pebs[1]);
     return 0;
 }
 

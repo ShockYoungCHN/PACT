@@ -12,7 +12,9 @@
 #define PACT_CONSTANTS_H
 
 /* Default migration ring size. Power of 2. */
-#define MIGRATION_RING_DEFAULT_SIZE 65536U
+/* Must be a power of two. Capacity is size-1; keep this > census_migrate_limit
+ * so one userspace epoch can enqueue a full 256K-page (1GB) burst. */
+#define MIGRATION_RING_DEFAULT_SIZE 524288U
 
 /* PAC update ring drain batch — number of encoded samples popped per
  * ring_buffer_uint64_pop_batch() call inside the adaptive coroutine. */

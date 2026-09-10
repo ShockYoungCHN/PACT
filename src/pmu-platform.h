@@ -26,9 +26,10 @@ struct pmu_platform {
     pmu_platform_id_t id;
     const char *name;
 
-    /* Core events (PEBS + counting) */
-    uint64_t event_llc_miss_local;  /* MEM_LOAD_L3_MISS_RETIRED.LOCAL_DRAM */
-    uint64_t event_llc_miss_remote; /* MEM_LOAD_L3_MISS_RETIRED.REMOTE_DRAM */
+    /* Core events: PEBS + counting both use the split LOCAL/REMOTE pair.
+     * Do not add a combined 0x03d3 / 0x80d1 field — unused after dual PEBS. */
+    uint64_t event_llc_miss_local;  /* MEM_LOAD_L3_MISS_RETIRED.LOCAL_DRAM (0x01d3) */
+    uint64_t event_llc_miss_remote; /* MEM_LOAD_L3_MISS_RETIRED.REMOTE_DRAM (0x02d3) */
 
     /* CHA-to-core mapping */
     int nr_cha_mapping;

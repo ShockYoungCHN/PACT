@@ -46,7 +46,8 @@ struct pc_class_state {
 
 static const char *const CLASS_NAMES[PC_CLASS_COUNT] = {
     "C1_latency",
-    "C2_stream",
+    "C2_affine",
+    "C2_gather",
     "C3_hot_l1",
     "C4_other",
 };
@@ -57,6 +58,10 @@ static int class_id_from_name(const char *name)
         if (strcmp(name, CLASS_NAMES[i]) == 0) {
             return i;
         }
+    }
+    /* Legacy alias from pre-split taxonomy. */
+    if (strcmp(name, "C2_stream") == 0) {
+        return PC_CLASS_C2_AFFINE;
     }
     return -1;
 }
@@ -86,11 +91,13 @@ pc_class_state_t *pc_class_create(void)
     if (!st) {
         return NULL;
     }
-    /* Neutral defaults matching pc_driven until a weights file is loaded. */
+    /* Neutral defaults matching pc_driven until a weights file is loaded.
+     * Scale is relative to C1_latency = 1.0. */
     st->weights[PC_CLASS_C1_LATENCY] = 1.0;
-    st->weights[PC_CLASS_C2_STREAM] = 1.0;
-    st->weights[PC_CLASS_C3_HOT_L1] = 1.0;
-    st->weights[PC_CLASS_C4_OTHER] = 1.0;
+    st->weights[PC_CLASS_C2_AFFINE] = 0.06;
+    st->weights[PC_CLASS_C2_GATHER] = 0.06;
+    st->weights[PC_CLASS_C3_HOT_L1] = 0.01;
+    st->weights[PC_CLASS_C4_OTHER] = 0.06;
     return st;
 }
 
@@ -227,6 +234,20 @@ static int load_weights_from_json(pc_class_state_t *st, const char *buf)
             found++;
         }
     }
+    /* Legacy single C2_stream → fill missing affine/gather. */
+    {
+        double legacy, tmp;
+        if (json_find_number_after_key(scan, "C2_stream", &legacy) == 0) {
+            if (json_find_number_after_key(scan, "C2_affine", &tmp) != 0) {
+                st->weights[PC_CLASS_C2_AFFINE] = legacy;
+                found++;
+            }
+            if (json_find_number_after_key(scan, "C2_gather", &tmp) != 0) {
+                st->weights[PC_CLASS_C2_GATHER] = legacy;
+                found++;
+            }
+        }
+    }
     return found > 0 ? 0 : -1;
 }
 
@@ -305,8 +326,10 @@ int pc_class_load_weights(pc_class_state_t *st, const char *path)
     }
     st->weights_loaded = true;
     log_info("pc_class_load_weights",
-             "Loaded class weights: C1=%.3f C2=%.3f C3=%.3f C4=%.3f from %s",
-             st->weights[0], st->weights[1], st->weights[2], st->weights[3], path);
+             "Loaded class weights: C1=%.3f C2a=%.3f C2g=%.3f C3=%.3f C4=%.3f from %s",
+             st->weights[PC_CLASS_C1_LATENCY], st->weights[PC_CLASS_C2_AFFINE],
+             st->weights[PC_CLASS_C2_GATHER], st->weights[PC_CLASS_C3_HOT_L1],
+             st->weights[PC_CLASS_C4_OTHER], path);
     return 0;
 }
 

@@ -3,9 +3,8 @@
 
 /* stats-coro.c — periodic stats coroutine.
  *
- *
- * Yields control every `stats_interval_ms` to update derived metrics +
- * call print_stats. Uses minicoro coroutines.
+ * Yields every `stats_interval_ms` to log rates + PAC_DIST / census lines.
+ * Full print_stats() runs at exit (stats.c).
  */
 
 #include <stdio.h>
@@ -15,6 +14,7 @@
 #include "error.h"
 #include "minicoro.h"
 #include "pact.h"
+#include "score_sample.h"
 #include "stats.h"
 #include "stats-coro.h"
 #include "tsc.h"
@@ -106,10 +106,9 @@ static void log_pac_telemetry(pact_context_t *ctx)
     log_one_workload_pac_dist(wl);
 }
 
-/* pc capacity-aware θ feedback (path 1). Count fast-tier pages and nudge the promotion/
- * demotion threshold θ toward the capacity target C, so the fast tier converges to the
- * top-C pages by score. Runs once per stats interval; θ is a double only written here
- * (single writer) and read by the aggregator — a benign staleness race, θ is a hint. */
+/* pc PEBS capacity-aware θ: set threshold to the (1 - pc_target_frac)
+ * percentile of the reservoir (top-frac by score). Independent of census
+ * --fast-tier-frac. Written here each stats interval; aggregator reads it. */
 static int pc_cmp_double(const void *a, const void *b)
 {
     double x = *(const double *)a, y = *(const double *)b;
@@ -156,7 +155,13 @@ void stats_coroutine(mco_coro *co)
 
         uint64_t events_delta = st->pebs_events_processed - last_stats.pebs_events_processed;
         uint64_t promotions_delta = st->promotion_successes - last_stats.promotion_successes;
-        uint64_t demotions_delta = st->demotion_successes - last_stats.demotion_successes;
+        uint64_t demotions_delta;
+        if (ctx->demotion_policy == DEMOTION_USERSPACE) {
+            demotions_delta =
+                (uint64_t)st->pact_demotions - (uint64_t)last_stats.pact_demotions;
+        } else {
+            demotions_delta = st->demotion_successes - last_stats.demotion_successes;
+        }
 
         log_info("stats_coroutine",
                  "Time passed %.2fs, Events: %lu/sec, Pages promoted: %lu/sec, "
@@ -166,9 +171,18 @@ void stats_coroutine(mco_coro *co)
                  (uint64_t)(demotions_delta / elapsed_sec), total_hash_entries(ctx));
 
         log_info("stats_coroutine", "  PAC: pool_alloc_skip=%lu", st->pool_alloc_skipped);
+        if (ctx->demotion_policy == DEMOTION_USERSPACE) {
+            log_info("stats_coroutine",
+                     "  Census: epochs=%lu tracked=%lu K=%lu enq_demote=%lu enq_promote=%lu "
+                     "pact_demotions=%lu",
+                     st->census_epochs, st->census_tracked, st->census_k,
+                     st->census_enqueued_demote, st->census_enqueued_promote,
+                     (uint64_t)st->pact_demotions);
+        }
         log_workload_summary(ctx);
         log_pac_telemetry(ctx);
-        pc_threshold_feedback(ctx); /* pc capacity-aware: nudge θ toward C */
+        pc_threshold_feedback(ctx); /* pc PEBS capacity θ from PACT_PC_TARGET_FRAC */
+        score_sample_dump(ctx, (double)(now - ctx->start_tsc) / ctx->tsc_freq_hz);
 
         last_stats = *st;
         last_tsc = now;

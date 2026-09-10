@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "error.h"
 #include "pact.h"
@@ -34,10 +35,12 @@ void init_perf_event(perf_event_t *perf_event)
 void init_per_cpu_state(per_cpu_state_t *cpu_state)
 {
     cpu_state->cpu_id = -1;
-    cpu_state->fd_pebs = -1;
+    cpu_state->fd_pebs[0] = -1;
+    cpu_state->fd_pebs[1] = -1;
     init_perf_event(&cpu_state->leader);
     cpu_state->pebs_sampling_period = PEBS_SAMPLE_PERIOD; /* may be overridden in pact_init */
-    cpu_state->pebs_mmap = NULL;
+    cpu_state->pebs_mmap[0] = NULL;
+    cpu_state->pebs_mmap[1] = NULL;
 }
 
 static void setup_one_cpu_perf(per_cpu_state_t *cs, bool skip)
@@ -47,17 +50,28 @@ static void setup_one_cpu_perf(per_cpu_state_t *cs, bool skip)
     if (setup_dummy_leader_event(&cs->leader, -1, cs->cpu_id) < 0) {
         log_warning("perf_events", "Skipping CPU %d (dummy leader failed — CPU offline?)",
                     cs->cpu_id);
-        cs->fd_pebs = -1;
+        cs->fd_pebs[0] = -1;
+        cs->fd_pebs[1] = -1;
         return;
     }
 
     if (skip) {
-        cs->fd_pebs = -1;
+        cs->fd_pebs[0] = -1;
+        cs->fd_pebs[1] = -1;
     } else {
         int r = setup_pebs_event(cs, -1, cs->cpu_id);
         if (r < 0) {
-            log_warning("perf_events", "PEBS setup failed on CPU %d", cs->cpu_id);
-            cs->fd_pebs = -1;
+            log_warning("perf_events",
+                        "PEBS setup failed on CPU %d (need both 0x01d3 and 0x02d3)",
+                        cs->cpu_id);
+            for (int t = 0; t < 2; t++) {
+                if (cs->pebs_mmap[t] && cs->pebs_mmap[t] != MAP_FAILED) {
+                    munmap(cs->pebs_mmap[t], (1 + PERF_BUFFER_PAGES) * PAGE_SIZE);
+                }
+                safe_close(cs->fd_pebs[t], "perf_events");
+                cs->fd_pebs[t] = -1;
+                cs->pebs_mmap[t] = NULL;
+            }
         }
     }
 }
@@ -67,7 +81,8 @@ static int count_configured_pebs_cpus(pact_context_t *pact, int nr_cpus)
     int n = 0;
     for (int cpu = 0; cpu < nr_cpus; cpu++) {
         per_cpu_state_t *cpu_state = &pact->cpu_states[cpu];
-        if (cpu_state->fd_pebs >= 0 && cpu_state->pebs_mmap) {
+        if (cpu_state->fd_pebs[0] >= 0 && cpu_state->pebs_mmap[0] &&
+            cpu_state->fd_pebs[1] >= 0 && cpu_state->pebs_mmap[1]) {
             n++;
         }
     }
