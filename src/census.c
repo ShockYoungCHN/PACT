@@ -30,6 +30,8 @@
 
 #define CENSUS_HYST_EPOCHS 2U
 #define CENSUS_NODE_SAMPLES 8U
+/* Keep this much free on node0 before enqueueing promotes (pages). */
+#define CENSUS_PROMOTE_HEADROOM_4K ((512ULL * 1024 * 1024) / 4096ULL)
 #define PM_PRESENT (1ULL << 63)
 
 typedef struct {
@@ -76,6 +78,23 @@ static uint64_t read_node0_pages_4k(void)
     uint64_t kb = 0;
     while (fgets(line, sizeof(line), fp)) {
         if (sscanf(line, "Node 0 MemTotal: %lu kB", &kb) == 1) {
+            break;
+        }
+    }
+    fclose(fp);
+    return (kb * 1024ULL) / PAGE_SIZE;
+}
+
+static uint64_t read_node0_free_4k(void)
+{
+    FILE *fp = fopen("/sys/devices/system/node/node0/meminfo", "r");
+    if (!fp) {
+        return 0;
+    }
+    char line[256];
+    uint64_t kb = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (sscanf(line, "Node 0 MemFree: %lu kB", &kb) == 1) {
             break;
         }
     }
@@ -424,16 +443,27 @@ static void census_enforce(pact_context_t *pact, mco_coro *co)
             ndemo++;
         }
     }
-    /* Do not promote until at least one demote has been enqueued this run.
-     * Otherwise high-score slow-tier pages promote into an already-full
-     * node0 while demote hysteresis is still arming. */
+    /* Do not promote until at least one demote has been enqueued this run,
+     * and only into real MemFree headroom — otherwise promote success
+     * collapses into a full node0 (~30% vs ~90%). */
     if (pact->workload->stats.census_enqueued_demote > 0) {
-        for (i = 0; i < st->k_granules && left > 0; i++) {
+        uint64_t free4k = read_node0_free_4k();
+        uint32_t promo_cap = left;
+        if (free4k <= CENSUS_PROMOTE_HEADROOM_4K) {
+            promo_cap = 0;
+        } else {
+            uint64_t room = free4k - CENSUS_PROMOTE_HEADROOM_4K;
+            if ((uint64_t)promo_cap > room) {
+                promo_cap = (uint32_t)room;
+            }
+        }
+        for (i = 0; i < st->k_granules && promo_cap > 0; i++) {
             census_granule_t *g = rank[i];
             if (g->node != 1) {
                 continue;
             }
-            uint32_t got = enqueue_granule(pact, g, 0, left);
+            uint32_t got = enqueue_granule(pact, g, 0, promo_cap);
+            promo_cap -= got;
             left -= got;
             if (got) {
                 npromo++;
