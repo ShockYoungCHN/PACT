@@ -622,23 +622,18 @@ static void mig_dispatch_batch(pact_context_t *ctx, pid_t target_pid, void **pag
 
 /* Add one entry to the in-flight batch arrays. Returns false if the page
  * is already at its target tier (stale enqueue) — caller must not advance
- * batch_count. Under userspace census, skip the from-tier gate: placement
- * is decided by census + move_pages (PEBS tier can disagree inside a 2MB
- * granule). */
+ * batch_count. Bisect peel3: restore from-tier gate even under userspace. */
 static bool mig_add_entry_to_batch(const migration_entry_t *entry, void **pages, int *nodes,
-                                   pac_metadata_t **metas, int *status, int idx,
-                                   demotion_policy_t policy)
+                                   pac_metadata_t **metas, int *status, int idx)
 {
     uint64_t addr = entry->page_addr;
     if (entry->meta) {
-        if (policy != DEMOTION_USERSPACE) {
-            uint8_t cur = entry->meta->tier;
-            if (cur == 0 || cur == 1) {
-                int expected_from_tier = (entry->target_node == 0) ? 1 : 0;
-                if (cur != expected_from_tier) {
-                    entry->meta->migrating = false;
-                    return false;
-                }
+        uint8_t cur = entry->meta->tier;
+        if (cur == 0 || cur == 1) {
+            int expected_from_tier = (entry->target_node == 0) ? 1 : 0;
+            if (cur != expected_from_tier) {
+                entry->meta->migrating = false;
+                return false;
             }
         }
         if (!addr) {
@@ -669,8 +664,7 @@ static int mig_drain_workload_ring(pact_context_t *ctx, void **pages, int *nodes
         int batch_count = 0;
         migration_entry_t entry;
         while (batch_count < batch_limit && ring_buffer_migration_entry_pop(ring, &entry)) {
-            if (mig_add_entry_to_batch(&entry, pages, nodes, metas, status, batch_count,
-                                       ctx->demotion_policy)) {
+            if (mig_add_entry_to_batch(&entry, pages, nodes, metas, status, batch_count)) {
                 batch_count++;
             }
         }
