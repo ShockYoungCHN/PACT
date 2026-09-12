@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/* census.c — userspace budget enforcement: census + top-K + demote-first.
+/* rerank.c — userspace budget enforcement: rerank + top-K + demote-first.
  *
  * PEBS only scores pages (pac_value already reflects --score-mode). This walk
  * ranks Σ page pac_value per 2MB granule, places by move_pages majority,
@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 #include "balance.h"
-#include "census.h"
+#include "rerank.h"
 #include "constants.h"
 #include "error.h"
 #include "khashl.h"
@@ -28,10 +28,10 @@
 #include "pmu.h"
 #include "utils.h"
 
-#define CENSUS_HYST_EPOCHS 2U
-#define CENSUS_NODE_SAMPLES 8U
+#define RERANK_HYST_EPOCHS 2U
+#define RERANK_NODE_SAMPLES 8U
 /* Keep this much free on node0 before enqueueing promotes (pages). */
-#define CENSUS_PROMOTE_HEADROOM_4K ((512ULL * 1024 * 1024) / 4096ULL)
+#define RERANK_PROMOTE_HEADROOM_4K ((512ULL * 1024 * 1024) / 4096ULL)
 #define PM_PRESENT (1ULL << 63)
 
 typedef struct {
@@ -40,13 +40,13 @@ typedef struct {
     int8_t node; /* 0 fast, 1 slow, -1 unknown */
     uint8_t miss_epochs;
     uint8_t in_flight;
-} census_granule_t;
+} rerank_granule_t;
 
-KHASHL_MAP_INIT(KH_LOCAL, census_table_t, census_table, uint64_t, census_granule_t *,
+KHASHL_MAP_INIT(KH_LOCAL, rerank_table_t, rerank_table, uint64_t, rerank_granule_t *,
                 kh_hash_uint64, kh_eq_generic)
 
-struct census_state {
-    census_table_t *table;
+struct rerank_state {
+    rerank_table_t *table;
     uint64_t granule_bytes;
     uint64_t granule_mask;
     uint64_t node0_pages_4k;
@@ -54,7 +54,7 @@ struct census_state {
     uint32_t seed_countdown;
 };
 
-typedef struct census_state census_state_t;
+typedef struct rerank_state rerank_state_t;
 
 /* Granule score is Σ page pac_value (pc: Σ w_c·samples; pac: Σ stalls).
  * Do not take max or log1p here: one PEBS hit must not outrank a fully
@@ -102,17 +102,17 @@ static uint64_t read_node0_free_4k(void)
     return (kb * 1024ULL) / PAGE_SIZE;
 }
 
-static census_granule_t *census_get_or_add(census_state_t *st, uint64_t granule)
+static rerank_granule_t *rerank_get_or_add(rerank_state_t *st, uint64_t granule)
 {
     int ret;
-    khint_t k = census_table_put(st->table, granule, &ret);
+    khint_t k = rerank_table_put(st->table, granule, &ret);
     if (ret < 0 || k == kh_end(st->table)) {
         return NULL;
     }
     if (ret == 0) {
         return kh_val(st->table, k);
     }
-    census_granule_t *g = calloc(1, sizeof(*g));
+    rerank_granule_t *g = calloc(1, sizeof(*g));
     if (!g) {
         return NULL;
     }
@@ -144,7 +144,7 @@ static bool pagemap_present(int pfd, uint64_t page)
 
 /* Seed / refresh resident anonymous granules so first-touch node0 pages
  * that PEBS never sees still enter the ranking (score 0 → demote first). */
-static void census_seed_resident(pact_context_t *pact, census_state_t *st)
+static void rerank_seed_resident(pact_context_t *pact, rerank_state_t *st)
 {
     pid_t pid = pact->workload->target_pid;
     char maps_path[64], pm_path[64];
@@ -191,7 +191,7 @@ static void census_seed_resident(pact_context_t *pact, census_state_t *st)
             if (!pagemap_present(pfd, lo & PAGE_MASK)) {
                 continue;
             }
-            census_granule_t *g = census_get_or_add(st, granule);
+            rerank_granule_t *g = rerank_get_or_add(st, granule);
             if (!g) {
                 continue;
             }
@@ -207,12 +207,12 @@ static void census_seed_resident(pact_context_t *pact, census_state_t *st)
     close(pfd);
     fclose(maps);
     if (added > 0) {
-        log_info("census_seed", "added/refreshed %lu granules, tracked=%u", added,
+        log_info("rerank_seed", "added/refreshed %lu granules, tracked=%u", added,
                  kh_size(st->table));
     }
 }
 
-static void census_merge_scores(pact_context_t *pact, census_state_t *st)
+static void rerank_merge_scores(pact_context_t *pact, rerank_state_t *st)
 {
     pac_table_t *table = pact->workload->pac_table;
     khint_t k;
@@ -223,7 +223,7 @@ static void census_merge_scores(pact_context_t *pact, census_state_t *st)
             continue;
         }
         uint64_t granule = meta->page_addr & st->granule_mask;
-        census_granule_t *g = census_get_or_add(st, granule);
+        rerank_granule_t *g = rerank_get_or_add(st, granule);
         if (!g) {
             continue;
         }
@@ -236,8 +236,8 @@ static void census_merge_scores(pact_context_t *pact, census_state_t *st)
 
 static int cmp_rank(const void *a, const void *b)
 {
-    const census_granule_t *x = *(census_granule_t *const *)a;
-    const census_granule_t *y = *(census_granule_t *const *)b;
+    const rerank_granule_t *x = *(rerank_granule_t *const *)a;
+    const rerank_granule_t *y = *(rerank_granule_t *const *)b;
     if (x->score != y->score) {
         return (x->score < y->score) - (x->score > y->score); /* desc */
     }
@@ -264,7 +264,7 @@ static pac_metadata_t *lookup_meta(pact_context_t *pact, uint64_t page)
     return kh_val(pact->workload->pac_table, k);
 }
 
-static uint32_t enqueue_granule(pact_context_t *pact, census_granule_t *g, int target,
+static uint32_t enqueue_granule(pact_context_t *pact, rerank_granule_t *g, int target,
                                 uint32_t left)
 {
     if (left == 0) {
@@ -290,22 +290,22 @@ static uint32_t enqueue_granule(pact_context_t *pact, census_granule_t *g, int t
     if (pushed > 0) {
         g->in_flight = 1;
         if (target == 0) {
-            pact->workload->stats.census_enqueued_promote += pushed;
+            pact->workload->stats.rerank_enqueued_promote += pushed;
         } else {
-            pact->workload->stats.census_enqueued_demote += pushed;
+            pact->workload->stats.rerank_enqueued_demote += pushed;
         }
     }
     return pushed;
 }
 
-static void census_refresh_nodes(pact_context_t *pact, census_state_t *st, mco_coro *co)
+static void rerank_refresh_nodes(pact_context_t *pact, rerank_state_t *st, mco_coro *co)
 {
     pid_t pid = pact->workload->target_pid;
     uint64_t n4k = pact->granule_bytes / PAGE_SIZE;
     if (n4k < 1) {
         n4k = 1;
     }
-    uint64_t step = n4k / CENSUS_NODE_SAMPLES;
+    uint64_t step = n4k / RERANK_NODE_SAMPLES;
     if (step < 1) {
         step = 1;
     }
@@ -314,15 +314,15 @@ static void census_refresh_nodes(pact_context_t *pact, census_state_t *st, mco_c
     khint_t k;
     kh_foreach(st->table, k)
     {
-        census_granule_t *g = kh_val(st->table, k);
+        rerank_granule_t *g = kh_val(st->table, k);
         if (!g || g->in_flight) {
             continue;
         }
 
-        void *pages[CENSUS_NODE_SAMPLES];
-        int status[CENSUS_NODE_SAMPLES];
+        void *pages[RERANK_NODE_SAMPLES];
+        int status[RERANK_NODE_SAMPLES];
         int nq = 0;
-        for (uint64_t i = 0; i < n4k && nq < (int)CENSUS_NODE_SAMPLES; i += step) {
+        for (uint64_t i = 0; i < n4k && nq < (int)RERANK_NODE_SAMPLES; i += step) {
             pages[nq++] = (void *)(g->granule + i * PAGE_SIZE);
         }
         memset(status, 0xff, sizeof(status));
@@ -346,16 +346,16 @@ static void census_refresh_nodes(pact_context_t *pact, census_state_t *st, mco_c
     }
 }
 
-static void census_enforce(pact_context_t *pact, mco_coro *co)
+static void rerank_enforce(pact_context_t *pact, mco_coro *co)
 {
-    census_state_t *st = pact->census;
+    rerank_state_t *st = pact->rerank;
     if (!st || !st->table || !pact->workload) {
         return;
     }
 
     ring_buffer_migration_entry_t *ring = pact->workload->migration_ring;
     if (ring && ring_buffer_migration_entry_size(ring) > (MIGRATION_RING_DEFAULT_SIZE / 4)) {
-        log_debug("census_enforce", "ring still draining (%u); skip epoch",
+        log_debug("rerank_enforce", "ring still draining (%u); skip epoch",
                   ring_buffer_migration_entry_size(ring));
         return;
     }
@@ -365,7 +365,7 @@ static void census_enforce(pact_context_t *pact, mco_coro *co)
     khint_t k;
     kh_foreach(st->table, k)
     {
-        census_granule_t *g = kh_val(st->table, k);
+        rerank_granule_t *g = kh_val(st->table, k);
         if (g) {
             g->score = 0.0;
             /* One-epoch sticky: a granule enqueued last tick is eligible again. */
@@ -374,28 +374,28 @@ static void census_enforce(pact_context_t *pact, mco_coro *co)
     }
 
     if (st->seed_countdown == 0) {
-        census_seed_resident(pact, st);
+        rerank_seed_resident(pact, st);
         st->seed_countdown = 4;
     } else {
         st->seed_countdown--;
     }
 
-    census_merge_scores(pact, st);
-    census_refresh_nodes(pact, st, co);
+    rerank_merge_scores(pact, st);
+    rerank_refresh_nodes(pact, st, co);
 
     uint32_t n = kh_size(st->table);
     if (n == 0) {
         return;
     }
 
-    census_granule_t **rank = malloc((size_t)n * sizeof(*rank));
+    rerank_granule_t **rank = malloc((size_t)n * sizeof(*rank));
     if (!rank) {
         return;
     }
     uint32_t i = 0;
     kh_foreach(st->table, k)
     {
-        census_granule_t *g = kh_val(st->table, k);
+        rerank_granule_t *g = kh_val(st->table, k);
         if (g) {
             rank[i++] = g;
         }
@@ -428,13 +428,13 @@ static void census_enforce(pact_context_t *pact, mco_coro *co)
         }
     }
 
-    uint32_t left = pact->census_migrate_limit;
+    uint32_t left = pact->rerank_migrate_limit;
     uint32_t ndemo = 0, npromo = 0;
 
     /* Demote first: free node0 before promotions try to allocate there. */
     for (i = (uint32_t)st->k_granules; i < n && left > 0; i++) {
-        census_granule_t *g = rank[i];
-        if (g->node != 0 || g->miss_epochs < CENSUS_HYST_EPOCHS) {
+        rerank_granule_t *g = rank[i];
+        if (g->node != 0 || g->miss_epochs < RERANK_HYST_EPOCHS) {
             continue;
         }
         uint32_t got = enqueue_granule(pact, g, 1, left);
@@ -443,22 +443,25 @@ static void census_enforce(pact_context_t *pact, mco_coro *co)
             ndemo++;
         }
     }
-    /* Do not promote until at least one demote has been enqueued this run,
-     * and only into real MemFree headroom — otherwise promote success
-     * collapses into a full node0 (~30% vs ~90%). */
-    if (pact->workload->stats.census_enqueued_demote > 0) {
+    /* Promote into MemFree headroom only (avoids stuffing a full node0).
+     *
+     * Do NOT require a prior demote this run: coloc2 / preferred=1 starts with
+     * everything on node1, so demote never fires and the old
+     * rerank_enqueued_demote>0 gate deadlocked promotions (promo_g=0 forever).
+     * Within an epoch we still demote before promote (loop order above). */
+    {
         uint64_t free4k = read_node0_free_4k();
         uint32_t promo_cap = left;
-        if (free4k <= CENSUS_PROMOTE_HEADROOM_4K) {
+        if (free4k <= RERANK_PROMOTE_HEADROOM_4K) {
             promo_cap = 0;
         } else {
-            uint64_t room = free4k - CENSUS_PROMOTE_HEADROOM_4K;
+            uint64_t room = free4k - RERANK_PROMOTE_HEADROOM_4K;
             if ((uint64_t)promo_cap > room) {
                 promo_cap = (uint32_t)room;
             }
         }
         for (i = 0; i < st->k_granules && promo_cap > 0; i++) {
-            census_granule_t *g = rank[i];
+            rerank_granule_t *g = rank[i];
             if (g->node != 1) {
                 continue;
             }
@@ -471,11 +474,11 @@ static void census_enforce(pact_context_t *pact, mco_coro *co)
         }
     }
 
-    pact->workload->stats.census_epochs++;
-    pact->workload->stats.census_tracked = n;
-    pact->workload->stats.census_k = st->k_granules;
+    pact->workload->stats.rerank_epochs++;
+    pact->workload->stats.rerank_tracked = n;
+    pact->workload->stats.rerank_k = st->k_granules;
 
-    log_info("census_enforce",
+    log_info("rerank_enforce",
              "tracked=%u K=%lu demo_g=%u promo_g=%u left=%u node0_4k=%lu frac=%.2f granule=%lu",
              n, st->k_granules, ndemo, npromo, left, st->node0_pages_4k, pact->fast_tier_frac,
              st->granule_bytes);
@@ -484,69 +487,69 @@ static void census_enforce(pact_context_t *pact, mco_coro *co)
     (void)co;
 }
 
-int census_init(pact_context_t *pact)
+int rerank_init(pact_context_t *pact)
 {
     if (!pact) {
         return -1;
     }
-    census_state_t *st = calloc(1, sizeof(*st));
+    rerank_state_t *st = calloc(1, sizeof(*st));
     if (!st) {
         return -1;
     }
     st->granule_bytes = pact->granule_bytes;
     if (st->granule_bytes < PAGE_SIZE || (st->granule_bytes & (st->granule_bytes - 1)) != 0) {
-        log_error("census_init", "granule_bytes must be power-of-two >= 4K (got %lu)",
+        log_error("rerank_init", "granule_bytes must be power-of-two >= 4K (got %lu)",
                   st->granule_bytes);
         free(st);
         return -1;
     }
     st->granule_mask = ~(st->granule_bytes - 1);
-    st->table = census_table_init();
+    st->table = rerank_table_init();
     if (!st->table) {
         free(st);
         return -1;
     }
     st->node0_pages_4k = read_node0_pages_4k();
     if (st->node0_pages_4k == 0) {
-        log_warning("census_init", "could not read node0 MemTotal; K will be tracked-set sized");
+        log_warning("rerank_init", "could not read node0 MemTotal; K will be tracked-set sized");
         st->node0_pages_4k = 1;
     }
     st->seed_countdown = 0;
-    pact->census = st;
+    pact->rerank = st;
 
     set_kernel_demotion_enabled(0);
-    log_info("census_init", "userspace demote: node0=%lu 4K pages (%.1f GB) frac=%.2f "
+    log_info("rerank_init", "userspace demote: node0=%lu 4K pages (%.1f GB) frac=%.2f "
                             "granule=%lu interval=%ums migrate_limit=%u",
              st->node0_pages_4k, (double)st->node0_pages_4k * PAGE_SIZE / (1024.0 * 1024.0 * 1024.0),
-             pact->fast_tier_frac, st->granule_bytes, pact->census_interval_ms,
-             pact->census_migrate_limit);
+             pact->fast_tier_frac, st->granule_bytes, pact->rerank_interval_ms,
+             pact->rerank_migrate_limit);
     return 0;
 }
 
-void census_destroy(pact_context_t *pact)
+void rerank_destroy(pact_context_t *pact)
 {
-    if (!pact || !pact->census) {
+    if (!pact || !pact->rerank) {
         return;
     }
-    census_state_t *st = pact->census;
+    rerank_state_t *st = pact->rerank;
     if (st->table) {
         khint_t k;
         kh_foreach(st->table, k)
         {
             free(kh_val(st->table, k));
         }
-        census_table_destroy(st->table);
+        rerank_table_destroy(st->table);
     }
     free(st);
-    pact->census = NULL;
+    pact->rerank = NULL;
 }
 
-void census_coroutine(mco_coro *co)
+void rerank_coroutine(mco_coro *co)
 {
     pact_context_t *ctx = (pact_context_t *)mco_get_user_data(co);
     while (ctx->running) {
-        if (ctx->demotion_policy == DEMOTION_USERSPACE && ctx->census) {
-            census_enforce(ctx, co);
+        if (ctx->demotion_policy == DEMOTION_USERSPACE && ctx->rerank) {
+            rerank_enforce(ctx, co);
         }
         mco_yield(co);
     }

@@ -63,7 +63,7 @@ pc_class_map="${pc_class_map:-}"
 # frequency) | pc (pure PC-class) | pac+pc.
 # Empty = PACT default (pac+pc if PC files given, else pac).
 score_mode="${score_mode:-}"
-# kernel (default) | userspace (census + top-K) | off
+# kernel (default) | userspace (rerank + top-K) | off
 demotion_policy="${demotion_policy:-}"
 # Algorithm 2 m; only with demotion_policy=kernel (userspace rejects this flag)
 demotion_margin="${demotion_margin:-}"
@@ -83,7 +83,7 @@ score_sample_n="${score_sample_n:-}"
 #
 # Demotion depends on demotion_policy → --demotion-policy:
 #   kernel     — Algorithm 2 toggles demotion_enabled (--demotion-margin)
-#   userspace  — census top-K (2MB / 500ms / 1GB/epoch; tune K via fast_tier_frac)
+#   userspace  — rerank top-K (2MB / 500ms / 1GB/epoch; tune K via fast_tier_frac)
 #   off        — no demotion (except optional PEBS θ if PACT_PC_TARGET_FRAC>0)
 #
 # The fast/slow SPLIT comes from a physically small fast tier, NOT from

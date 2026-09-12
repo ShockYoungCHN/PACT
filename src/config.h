@@ -25,10 +25,10 @@
 #define PACT_DEFAULT_COOLING_INTERVAL_MS 5000U
 #define PACT_DEFAULT_ADAPTIVE_INTERVAL_MS 20U
 #define PACT_DEFAULT_STATS_INTERVAL_MS 5000U
-#define PACT_DEFAULT_CENSUS_INTERVAL_MS 500U
+#define PACT_DEFAULT_RERANK_INTERVAL_MS 500U
 #define PACT_DEFAULT_FAST_TIER_FRAC 0.90
 #define PACT_DEFAULT_GRANULE_BYTES (2UL * 1024 * 1024)
-#define PACT_DEFAULT_CENSUS_MIGRATE_LIMIT 262144U
+#define PACT_DEFAULT_RERANK_MIGRATE_LIMIT 262144U
 /* Cap on pages promoted per 20 ms cycle. A low cap throttles promotion so
  * PACT converges too slowly to relieve slow-tier pressure; 4096 keeps the
  * critical set moving without overwhelming the migration thread. Override
@@ -45,11 +45,11 @@ typedef struct pact_config {
     uint32_t cooling_interval_ms;
     uint32_t adaptive_interval_ms;
     uint32_t stats_interval_ms;
-    uint32_t census_interval_ms;
+    uint32_t rerank_interval_ms;
     uint32_t max_migrations_per_cycle;
     double fast_tier_frac;
     uint64_t granule_bytes;
-    uint32_t census_migrate_limit;
+    uint32_t rerank_migrate_limit;
     uint64_t demotion_margin; /* Algorithm 2 m (kernel demotion only; default 0) */
     uint64_t pebs_period;
     uint32_t bin_count;

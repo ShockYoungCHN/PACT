@@ -24,10 +24,10 @@ static void print_basic_stats(pact_context_t *pact)
     printf("Demotions (kernel LRU): %lu\n", pact->workload->stats.demotion_successes);
     printf("Demotions (batch results): %lu\n", pact->workload->stats.pact_demotions);
     if (pact->demotion_policy == DEMOTION_USERSPACE) {
-        printf("Census epochs: %lu  tracked=%lu  K=%lu  enq_demote=%lu  enq_promote=%lu\n",
-               pact->workload->stats.census_epochs, pact->workload->stats.census_tracked,
-               pact->workload->stats.census_k, pact->workload->stats.census_enqueued_demote,
-               pact->workload->stats.census_enqueued_promote);
+        printf("Rerank epochs: %lu  tracked=%lu  K=%lu  enq_demote=%lu  enq_promote=%lu\n",
+               pact->workload->stats.rerank_epochs, pact->workload->stats.rerank_tracked,
+               pact->workload->stats.rerank_k, pact->workload->stats.rerank_enqueued_demote,
+               pact->workload->stats.rerank_enqueued_promote);
     }
 }
 

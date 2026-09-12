@@ -3,7 +3,7 @@
 
 /* stats-coro.c — periodic stats coroutine.
  *
- * Yields every `stats_interval_ms` to log rates + PAC_DIST / census lines.
+ * Yields every `stats_interval_ms` to log rates + PAC_DIST / rerank lines.
  * Full print_stats() runs at exit (stats.c).
  */
 
@@ -107,7 +107,7 @@ static void log_pac_telemetry(pact_context_t *ctx)
 }
 
 /* pc PEBS capacity-aware θ: set threshold to the (1 - pc_target_frac)
- * percentile of the reservoir (top-frac by score). Independent of census
+ * percentile of the reservoir (top-frac by score). Independent of rerank
  * --fast-tier-frac. Written here each stats interval; aggregator reads it. */
 static int pc_cmp_double(const void *a, const void *b)
 {
@@ -173,10 +173,10 @@ void stats_coroutine(mco_coro *co)
         log_info("stats_coroutine", "  PAC: pool_alloc_skip=%lu", st->pool_alloc_skipped);
         if (ctx->demotion_policy == DEMOTION_USERSPACE) {
             log_info("stats_coroutine",
-                     "  Census: epochs=%lu tracked=%lu K=%lu enq_demote=%lu enq_promote=%lu "
+                     "  Rerank: epochs=%lu tracked=%lu K=%lu enq_demote=%lu enq_promote=%lu "
                      "pact_demotions=%lu",
-                     st->census_epochs, st->census_tracked, st->census_k,
-                     st->census_enqueued_demote, st->census_enqueued_promote,
+                     st->rerank_epochs, st->rerank_tracked, st->rerank_k,
+                     st->rerank_enqueued_demote, st->rerank_enqueued_promote,
                      (uint64_t)st->pact_demotions);
         }
         log_workload_summary(ctx);

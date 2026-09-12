@@ -74,7 +74,7 @@ void pact_print_usage(const char *prog_name)
     printf("                                    (default 0). Incompatible with "
            "--demotion-policy userspace.\n");
     printf("  --demotion-policy P               kernel = LRU + Algorithm 2 (default);\n");
-    printf("                                    userspace = census top-K by score "
+    printf("                                    userspace = rerank top-K by score "
            "(2MB granules, 500ms,\n");
     printf("                                    1GB/epoch migrate cap); "
            "off = no demotion.\n");

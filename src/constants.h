@@ -12,7 +12,7 @@
 #define PACT_CONSTANTS_H
 
 /* Default migration ring size. Power of 2. */
-/* Must be a power of two. Capacity is size-1; keep this > census_migrate_limit
+/* Must be a power of two. Capacity is size-1; keep this > rerank_migrate_limit
  * so one userspace epoch can enqueue a full 256K-page (1GB) burst. */
 #define MIGRATION_RING_DEFAULT_SIZE 524288U
 
