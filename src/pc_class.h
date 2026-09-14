@@ -17,16 +17,19 @@
 struct pact_context;
 
 /* Canonical class ids (stable names matching pc_driven/pc_behavior_classes.py).
- * C2 is split: affine scan vs independent gather. Legacy map/weight name
- * "C2_stream" is accepted as an alias of C2_affine when loading. */
+ * C2 is split: affine scan vs independent gather. Legacy map/weight names
+ * "C2_stream" → C2_affine and "C3_hot_l1" → C3_invariant when loading. */
 enum pc_class_id {
     PC_CLASS_C1_LATENCY = 0,
     PC_CLASS_C2_AFFINE = 1,
     PC_CLASS_C2_GATHER = 2,
-    PC_CLASS_C3_HOT_L1 = 3,
+    PC_CLASS_C3_INVARIANT = 3,
     PC_CLASS_C4_OTHER = 4,
     PC_CLASS_COUNT = 5
 };
+
+/* Legacy enum name (pre-invariant rename). */
+#define PC_CLASS_C3_HOT_L1 PC_CLASS_C3_INVARIANT
 
 typedef struct pc_class_state pc_class_state_t;
 
