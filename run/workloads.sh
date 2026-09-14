@@ -54,7 +54,7 @@ bc_kron_4t_omp_threads=4
 bc_kron_4t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/kron.sg -i4 -n4"
 
 # --- bc_urand_8t : GAP bc on uniform-random graph (-u27 -k16), 8 threads
-# Same scale/RSS class as bc_kron (~20 GB); memmap=86G!2G → ~1:1. -i4 -n4.
+# Same scale/RSS class as bc_kron (~20 GB); memmap=84G!4G → ~1:1. -i4 -n4.
 bc_urand_8t_pname="bc"
 bc_urand_8t_rss=20000
 bc_urand_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/urand.sg"

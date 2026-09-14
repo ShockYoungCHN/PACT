@@ -121,8 +121,10 @@ cd setup/kernel
 #     again. This is what creates the fast/slow capacity split; without it the
 #     whole workload fits in local DRAM and PACT is a no-op (see setup/README).
 #     For a 1:1 split, node-0 usable DRAM = workload RSS / 2.
-#     (example for a ~19.5 GB-RSS bc-kron on c220g5, node 0 ~95 GB -> ~10 GB:)
-sudo sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 memmap=86G!2G"/' /etc/default/grub
+#     c220g5: offset must be 4G (PCI hole ~2G–4G); 84G!4G ≈ ~10 GB node0.
+#     Prefer set_memmap.sh (E820-checked) over editing grub by hand:
+sudo ../../samuraiy_soaralto/run/set_memmap.sh --memmap 84G!4G
+#     (path relative to samuraiy_pact/; from setup/kernel use ../../../samuraiy_soaralto/...)
 sudo update-grub && sudo reboot
 
 # 1c. Prepare the machine (uncore pinning, CXL/NUMA layout, governor,

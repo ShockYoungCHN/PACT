@@ -84,25 +84,32 @@ Measure the workload's RSS first, on an unconstrained boot:
 ### Apply memmap
 
 `memmap=<R>G!<off>G` reserves `<R>` GB of DRAM starting at `<off>` GB, removing
-it from node 0. Add it to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`,
-then `sudo update-grub` and reboot.
+it from node 0. Prefer
+[`samuraiy_soaralto/run/set_memmap.sh`](../../samuraiy_soaralto/run/set_memmap.sh)
+(E820-checked) over hand-editing grub; it updates the last
+`GRUB_CMDLINE_LINUX=` override CloudLab actually uses. Then `sudo update-grub`
+and reboot.
+
+On c220g5 the PCI hole covers ~2G–4G, so **offset must be `4G`** (usable DRAM
+resumes at `0x100000000`). Older `!2G` recipes fail `set_memmap.sh` validation.
 
 ```bash
 # c220g5: node 0 is ~95 GB. To leave ~10 GB usable (a 1:1 split for a ~19.5 GB
-# RSS bc-kron), reserve ~86 GB:
-sudo sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 memmap=86G!2G"/' /etc/default/grub
+# RSS bc-kron), reserve 84 GB starting at 4G:
+sudo /path/to/samuraiy_soaralto/run/set_memmap.sh --memmap 84G!4G
 sudo update-grub && sudo reboot
 # After reboot, confirm node 0 free ~= RSS/2:
-numactl -H | grep -E 'node 0 (size|free)'   # e.g. size 10676 MB, free ~10 GB
+numactl -H | grep -E 'node 0 (size|free)'   # e.g. size ~10600 MB, free ~10 GB
 ```
 
 > The exact node-0 size for a given `memmap` varies by ~hundreds of MB each
 > boot and by machine - tune the reserved GB up/down by 1-2 and re-check
 > `numactl -H` until `node 0 free` is close to your target. On a fresh boot the
 > OS holds only ~0.5 GB of node 0, so `node 0 free ~= node 0 size`.
-> **Verified values (c220g5, bc-kron 8t, RSS ~19.5 GB):** `memmap=86G!2G` gives
-> node 0 ~10.7 GB total / ~10 GB free = 1:1. `memmap=76G!2G` gives ~20 GB =
+> **Verified values (c220g5, bc-kron 8t, RSS ~19.5 GB):** `memmap=84G!4G` gives
+> node 0 ~10.6 GB total / ~9–10 GB free = 1:1. `memmap=74G!4G` gives ~20 GB =
 > the FULL RSS (no split - do not use for a 1:1 experiment).
+> (`86G!2G` / `76G!2G` were old equivalents that overlapped the PCI hole; do not use.)
 
 ## Notes
 
