@@ -83,12 +83,23 @@ Measure the workload's RSS first, on an unconstrained boot:
 
 ### Apply memmap
 
-`memmap=<R>G!<off>G` reserves `<R>` GB of DRAM starting at `<off>` GB, removing
+`memmap=<R>G$<off>G` reserves `<R>` GB of DRAM starting at `<off>` GB, removing
 it from node 0. Prefer
 [`samuraiy_soaralto/run/set_memmap.sh`](../../samuraiy_soaralto/run/set_memmap.sh)
 (E820-checked) over hand-editing grub; it updates the last
 `GRUB_CMDLINE_LINUX=` override CloudLab actually uses. Then `sudo update-grub`
-and reboot.
+and reboot. Quote the argument (`'84G$4G'`): an unquoted `$` is expanded by
+the shell, and GRUB would also eat a bare `$`. The script writes the escapes.
+
+`!` and `$` are different kernel operators
+([kernel-parameters.txt](https://www.kernel.org/doc/Documentation/admin-guide/kernel-parameters.txt)):
+
+| operator | e820 | what this kernel does |
+|----------|------|------------------------|
+| `memmap=R$off` | reserved | hole. Not RAM, not a device. |
+| `memmap=R!off` | type 12, PRAM | `CONFIG_X86_PMEM_LEGACY` registers `e820_pmem`, and `nd_pmem` claims the whole range as `/dev/pmem0`. Struct page for that range (~1/64 of it) is allocated from the remaining node 0 and cannot be migrated. |
+
+Use `$` to shrink the fast tier. `!` is for emulated persistent memory, and it spends part of node 0 on page descriptors for the hole.
 
 On c220g5 the PCI hole covers ~2G–4G, so **offset must be `4G`** (usable DRAM
 resumes at `0x100000000`). Older `!2G` recipes fail `set_memmap.sh` validation.
@@ -96,7 +107,7 @@ resumes at `0x100000000`). Older `!2G` recipes fail `set_memmap.sh` validation.
 ```bash
 # c220g5: node 0 is ~95 GB. To leave ~10 GB usable (a 1:1 split for a ~19.5 GB
 # RSS bc-kron), reserve 84 GB starting at 4G:
-sudo /path/to/samuraiy_soaralto/run/set_memmap.sh --memmap 84G!4G
+sudo /path/to/samuraiy_soaralto/run/set_memmap.sh --memmap '84G$4G'
 sudo update-grub && sudo reboot
 # After reboot, confirm node 0 free ~= RSS/2:
 numactl -H | grep -E 'node 0 (size|free)'   # e.g. size ~10600 MB, free ~10 GB
@@ -106,10 +117,11 @@ numactl -H | grep -E 'node 0 (size|free)'   # e.g. size ~10600 MB, free ~10 GB
 > boot and by machine - tune the reserved GB up/down by 1-2 and re-check
 > `numactl -H` until `node 0 free` is close to your target. On a fresh boot the
 > OS holds only ~0.5 GB of node 0, so `node 0 free ~= node 0 size`.
-> **Verified values (c220g5, bc-kron 8t, RSS ~19.5 GB):** `memmap=84G!4G` gives
-> node 0 ~10.6 GB total / ~9–10 GB free = 1:1. `memmap=74G!4G` gives ~20 GB =
+> **Verified values (c220g5, bc-kron 8t, RSS ~19.5 GB):** `memmap=84G$4G` gives
+> node 0 ~10.6 GB total / ~9–10 GB free = 1:1. `memmap=74G$4G` gives ~20 GB =
 > the FULL RSS (no split - do not use for a 1:1 experiment).
-> (`86G!2G` / `76G!2G` were old equivalents that overlapped the PCI hole; do not use.)
+> (`86G!2G` / `76G!2G` were old equivalents that overlapped the PCI hole; do not use.
+> The same sizes with `!` at `4G` also overlap nothing, but they create `/dev/pmem0`.)
 
 ## Notes
 
