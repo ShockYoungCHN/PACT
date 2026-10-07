@@ -14,6 +14,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h> /* For PAGE_SIZE */
 #include <signal.h> /* kill(pid, 0) workload-exit probe */
+#include <sys/types.h>
 #include <time.h>
 #include "constants.h"
 #include "pact.h"
@@ -28,6 +29,9 @@
 typedef struct {
     uint64_t addr_enc; /* PEBS_ENCODE_ADDR_TIER */
     uint64_t ip;
+    pid_t pid;
+    pid_t tid; /* originating Linux thread, not the sampling thread */
+    uint64_t drain_time_ns; /* CLOCK_MONOTONIC at mmap drain, before attribution */
 } pebs_staged_sample_t;
 
 #ifndef PAGE_SIZE
@@ -170,8 +174,14 @@ static int read_one_pebs_mmap(pebs_aggregator_t *agg, void *pebs_mmap,
             if (hdr.size >= sizeof(rec)) {
                 ring_copy(&rec, data, off, sizeof(rec), data_size);
                 if (is_target_pid(agg->pact_ctx, (pid_t)rec.pid)) {
+                    struct timespec now;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    events[count].drain_time_ns =
+                        (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
                     events[count].addr_enc = PEBS_ENCODE_ADDR_TIER(rec.addr, hw_tier);
                     events[count].ip = rec.ip;
+                    events[count].pid = (pid_t)rec.pid;
+                    events[count].tid = (pid_t)rec.tid;
                     count++;
                     agg->events_per_tier[hw_tier]++;
                     if (hw_tier == 0) {
@@ -273,7 +283,8 @@ static void compute_attributed_stalls(pact_context_t *ctx, pebs_aggregator_t *ag
  * so the heatmap base and the migration overlay come from the SAME run and the
  * SAME clock, with no external perf capture (no PEBS counter contention).
  * Subsampled via PACT_PEBS_SAMPLES_STRIDE (default 1). Absolute CLOCK_MONOTONIC
- * ns aligns with the migration log. Format: "time_ns page_id" (2MB pages). */
+ * ns aligns with the migration log. Format: "time_ns pid ip addr page_id tid".
+ * page_id is addr >> 21 (2MB regions); tid is the originating Linux thread. */
 static FILE *g_heat_fp = NULL;
 static bool g_heat_done = false;
 static unsigned long g_heat_stride = 1;
@@ -297,10 +308,11 @@ static void heat_dump_init_once(void)
             g_heat_stride = v;
         }
     }
-    fprintf(g_heat_fp, "time_ns page_id\n");
+    fprintf(g_heat_fp, "time_ns pid ip addr page_id tid\n");
 }
 
-static inline void heat_dump_sample(uint64_t page_addr)
+static inline void heat_dump_sample(pid_t pid, pid_t tid, uint64_t ip, uint64_t addr,
+                                    uint64_t time_ns)
 {
     if (!g_heat_done) {
         heat_dump_init_once();
@@ -311,10 +323,9 @@ static inline void heat_dump_sample(uint64_t page_addr)
     if ((g_heat_ctr++ % g_heat_stride) != 0) {
         return;
     }
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    long long ns = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
-    fprintf(g_heat_fp, "%lld %llu\n", ns, (unsigned long long)(page_addr >> 21));
+    fprintf(g_heat_fp, "%llu %d 0x%lx 0x%lx %llu %d\n", (unsigned long long)time_ns, (int)pid,
+            (unsigned long)ip, (unsigned long)addr,
+            (unsigned long long)(addr >> 21), (int)tid);
     if ((g_heat_ctr & 0x1FFF) == 0) {
         fflush(g_heat_fp);
     }
@@ -388,7 +399,8 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
             }
         }
         log_pebs_sample(ctx, "pebs_aggregate_events", 0, addr, tier, attributed);
-        heat_dump_sample(page);
+        heat_dump_sample(agg->cycle_buf[i].pid, agg->cycle_buf[i].tid, ip, addr,
+                         agg->cycle_buf[i].drain_time_ns);
 
         uint64_t pac_encoded = PEBS_ENCODE_PAC(attributed, page, tier);
         if (ring_buffer_uint64_push(ctx->pac_update_ring, pac_encoded) == 0) {

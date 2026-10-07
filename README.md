@@ -206,6 +206,31 @@ logging, diagnostics).
 NBT, Nomad, Colloid-tpp, Memtis, and Soar/Alto, each with its own README
 documenting the exact kernel tag and build steps.
 
+## Saving PEBS samples
+
+Set `PACT_PEBS_SAMPLES_CSV=/path/to/pebs.txt` to save the samples collected
+by PACT. `PACT_PEBS_SAMPLES_STRIDE` defaults to `1`; `N` retains every Nth
+sample. Export is disabled when the path is unset or empty.
+
+The whitespace-separated header is:
+
+```text
+time_ns pid ip addr page_id tid
+```
+
+`pid` is the workload process (TGID); `tid` is the Linux thread that issued
+the sampled load, taken from `PERF_SAMPLE_TID`. It is not the collector's
+thread ID. A nonpositive `tid` is unavailable and must not be assigned to a
+worker. `ip` and `addr` are hexadecimal instruction and data addresses.
+`page_id` is `addr >> 21`, a 2 MiB region ID; derive a 4 KiB page ID with
+`addr >> 12`. `time_ns` is `CLOCK_MONOTONIC` when the perf ring is drained,
+not the hardware time of the load. Exported records are sampled LLC misses,
+not a complete trace of memory accesses. Existing files without `tid` cannot
+recover thread identity. To associate IDs with roles, record the workload's
+worker/TID mapping during the same run.
+
+The decoder/export regression check is `bash tests/test_pebs_tid.sh`.
+
 ## Limitations and future directions
 
 This is a research artifact built to reproduce the paper's results. A few
