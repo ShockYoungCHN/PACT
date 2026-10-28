@@ -2,9 +2,14 @@
 /* rerank.c — userspace budget enforcement: rerank + top-K + demote-first.
  *
  * PEBS only scores pages (pac_value already reflects --score-mode). This walk
- * ranks Σ page pac_value per 2MB granule, places by move_pages majority,
- * demote-first then promote. Granule score is raw sum (no log1p) so sparse
+ * ranks Σ page pac_value per 2MB granule, then moves only the pages that are
+ * on the wrong node. A granule may be split (4KB interleave); it is not
+ * treated as entirely local just because half its samples sit on node0.
+ * Demote-first, then promote. Granule score is raw sum (no log1p) so sparse
  * hits cannot dominate a fully sampled neighbor.
+ *
+ * Node queries run inline on the control thread. A page-lock wait stalls all
+ * control coroutines; the sampling and migration threads keep running.
  */
 
 #include <errno.h>
@@ -30,17 +35,31 @@
 
 #define RERANK_HYST_EPOCHS 2U
 #define RERANK_NODE_SAMPLES 8U
+#define RERANK_NODE_FAST 0
+#define RERANK_NODE_SLOW 1
+#define RERANK_NODE_MIXED 2
 /* Keep this much free on node0 before enqueueing promotes (pages). */
 #define RERANK_PROMOTE_HEADROOM_4K ((512ULL * 1024 * 1024) / 4096ULL)
 #define PM_PRESENT (1ULL << 63)
 
 typedef struct {
     uint64_t granule;
+    pid_t pid;
     double score;
+    uint32_t n_pages; /* pages with pac_value > 0 merged this epoch */
+    uint16_t present; /* estimated resident 4K pages in this granule */
     int8_t node; /* 0 fast, 1 slow, -1 unknown */
     uint8_t miss_epochs;
     uint8_t in_flight;
 } rerank_granule_t;
+
+/* pid in high 32 bits, 2MB-granule index in low 32. Distinct processes
+ * with overlapping VAs do not collide. */
+static uint64_t rerank_key(pid_t pid, uint64_t granule, uint64_t granule_bytes)
+{
+    unsigned sh = granule_bytes ? (unsigned)__builtin_ctzll(granule_bytes) : 21u;
+    return ((uint64_t)(uint32_t)pid << 32) | (granule >> sh);
+}
 
 KHASHL_MAP_INIT(KH_LOCAL, rerank_table_t, rerank_table, uint64_t, rerank_granule_t *,
                 kh_hash_uint64, kh_eq_generic)
@@ -56,9 +75,11 @@ struct rerank_state {
 
 typedef struct rerank_state rerank_state_t;
 
-/* Granule score is Σ page pac_value (pc: Σ w_c·samples; pac: Σ stalls).
- * Do not take max or log1p here: one PEBS hit must not outrank a fully
- * sampled 2MB neighbor, and log1p(max) inverted C1 vs C2 under sparse PEBS. */
+/* Granule score is the sum of page pac_value.
+ * pc: each LLC-miss sample already added w_c*1024 (pc_class_score), so this
+ * sum is weight*miss. freq: pac_value is the miss count. pac: sum of stalls.
+ * Do not divide by access_count and do not replace the sum with one
+ * per-process scalar: that gives every granule of a pid the same rank. */
 static double page_score(const pact_context_t *pact, const pac_metadata_t *meta)
 {
     (void)pact;
@@ -102,10 +123,96 @@ static uint64_t read_node0_free_4k(void)
     return (kb * 1024ULL) / PAGE_SIZE;
 }
 
-static rerank_granule_t *rerank_get_or_add(rerank_state_t *st, uint64_t granule)
+/* Anonymous resident pages are reclaimable workload capacity. Exclude file
+ * mappings: shared library/file pages can be counted in multiple processes,
+ * and are not part of the anonymous working set seeded below. numa_maps uses
+ * base-page counts for THP, but huge-page counts for explicit hugetlb VMAs. */
+static uint64_t numa_line_fast_4k(const char *line)
+{
+    if (strstr(line, " file=")) {
+        return 0;
+    }
+    const char *node = strstr(line, " N0=");
+    unsigned long count = 0;
+    if (!node || sscanf(node, " N0=%lu", &count) != 1) {
+        return 0;
+    }
+    uint64_t multiplier = 1;
+    if (strstr(line, " huge ")) {
+        unsigned long kb = 0;
+        const char *size = strstr(line, " kernelpagesize_kB=");
+        if (!size || sscanf(size, " kernelpagesize_kB=%lu", &kb) != 1 || kb < 4) {
+            return 0;
+        }
+        multiplier = kb / 4;
+    }
+    return count > UINT64_MAX / multiplier ? UINT64_MAX : count * multiplier;
+}
+
+static bool read_workload_fast_4k(const pact_context_t *pact, uint64_t *pages)
+{
+    *pages = 0;
+    for (int i = 0; i < pact->n_workloads; i++) {
+        const pact_workload_t *wl = &pact->workloads[i];
+        if (wl->exited || wl->target_pid <= 0) {
+            continue;
+        }
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/numa_maps", (int)wl->target_pid);
+        FILE *fp = fopen(path, "r");
+        if (!fp) {
+            return false;
+        }
+        char *line = NULL;
+        size_t size = 0;
+        while (getline(&line, &size, fp) >= 0) {
+            uint64_t n = numa_line_fast_4k(line);
+            *pages = n > UINT64_MAX - *pages ? UINT64_MAX : *pages + n;
+        }
+        bool ok = !ferror(fp);
+        free(line);
+        fclose(fp);
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Ranking and promotion must use the same reachable capacity. If unrelated
+ * users occupy node0, a nominal MemTotal-sized keep set otherwise protects
+ * low-score resident pages while higher-score slow pages cannot be promoted.
+ * Also shrink the keep set when free memory has fallen below the reserve. */
+static uint64_t usable_budget_4k(uint64_t configured, uint64_t workload_fast,
+                                 uint64_t node_free, uint64_t reserve)
+{
+    uint64_t total = node_free > UINT64_MAX - workload_fast
+                         ? UINT64_MAX
+                         : workload_fast + node_free;
+    uint64_t reachable = total > reserve ? total - reserve : 0;
+    return reachable < configured ? reachable : configured;
+}
+
+static uint64_t rank_prefix(rerank_granule_t **rank, uint32_t n, uint64_t budget,
+                            uint64_t *kept)
+{
+    *kept = 0;
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        uint64_t resident = rank[i]->present ? rank[i]->present : 1;
+        if (resident > budget - *kept) {
+            break;
+        }
+        *kept += resident;
+    }
+    return i;
+}
+
+static rerank_granule_t *rerank_get_or_add(rerank_state_t *st, pid_t pid, uint64_t granule)
 {
     int ret;
-    khint_t k = rerank_table_put(st->table, granule, &ret);
+    uint64_t key = rerank_key(pid, granule, st->granule_bytes);
+    khint_t k = rerank_table_put(st->table, key, &ret);
     if (ret < 0 || k == kh_end(st->table)) {
         return NULL;
     }
@@ -117,19 +224,21 @@ static rerank_granule_t *rerank_get_or_add(rerank_state_t *st, uint64_t granule)
         return NULL;
     }
     g->granule = granule;
+    g->pid = pid;
     g->node = -1;
     kh_val(st->table, k) = g;
     return g;
 }
 
+/* Seed placement on the control thread, before the full epoch refresh. */
 static int query_node(pid_t pid, uint64_t page)
 {
     void *addr = (void *)page;
     int status = -1;
-    if (numa_move_pages(pid, 1, &addr, NULL, &status, 0) < 0) {
+    if (numa_move_pages(pid, 1, &addr, NULL, &status, 0) != 0) {
         return -1;
     }
-    return status;
+    return status >= 0 ? status : -1;
 }
 
 static bool pagemap_present(int pfd, uint64_t page)
@@ -144,21 +253,20 @@ static bool pagemap_present(int pfd, uint64_t page)
 
 /* Seed / refresh resident anonymous granules so first-touch node0 pages
  * that PEBS never sees still enter the ranking (score 0 → demote first). */
-static void rerank_seed_resident(pact_context_t *pact, rerank_state_t *st)
+static uint64_t rerank_seed_one(pact_context_t *pact, rerank_state_t *st, pid_t pid)
 {
-    pid_t pid = pact->workload->target_pid;
     char maps_path[64], pm_path[64];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
     snprintf(pm_path, sizeof(pm_path), "/proc/%d/pagemap", pid);
 
     FILE *maps = fopen(maps_path, "r");
     if (!maps) {
-        return;
+        return 0;
     }
     int pfd = open(pm_path, O_RDONLY);
     if (pfd < 0) {
         fclose(maps);
-        return;
+        return 0;
     }
 
     uint64_t added = 0;
@@ -191,21 +299,36 @@ static void rerank_seed_resident(pact_context_t *pact, rerank_state_t *st)
             if (!pagemap_present(pfd, lo & PAGE_MASK)) {
                 continue;
             }
-            rerank_granule_t *g = rerank_get_or_add(st, granule);
+            rerank_granule_t *g = rerank_get_or_add(st, pid, granule);
             if (!g) {
                 continue;
             }
-            if (g->node < 0) {
-                int node = query_node(pid, lo & PAGE_MASK);
-                if (node == 0 || node == 1) {
-                    g->node = (int8_t)node;
-                }
+            if (g->present == 0) {
+                g->present = 1; /* underestimate until refresh; keeps K large */
+            }
+            if (g->node < 0 && !g->in_flight && !pact_wl_exited(pact, pid)) {
+                g->node = query_node(pid, lo & PAGE_MASK);
                 added++;
             }
         }
     }
     close(pfd);
     fclose(maps);
+    return added;
+}
+
+static void rerank_seed_resident(pact_context_t *pact, rerank_state_t *st)
+{
+    uint64_t added = 0;
+    for (int i = 0; i < pact->n_workloads; i++) {
+        if (pact->workloads[i].exited) {
+            continue;
+        }
+        pid_t pid = pact->workloads[i].target_pid;
+        if (pid > 0) {
+            added += rerank_seed_one(pact, st, pid);
+        }
+    }
     if (added > 0) {
         log_info("rerank_seed", "added/refreshed %lu granules, tracked=%u", added,
                  kh_size(st->table));
@@ -214,23 +337,31 @@ static void rerank_seed_resident(pact_context_t *pact, rerank_state_t *st)
 
 static void rerank_merge_scores(pact_context_t *pact, rerank_state_t *st)
 {
-    pac_table_t *table = pact->workload->pac_table;
-    khint_t k;
-    kh_foreach(table, k)
-    {
-        pac_metadata_t *meta = kh_val(table, k);
-        if (!meta) {
+    /* One shared ranking. Each 2MB granule sums the page scores of its pid.
+     * A zero-sample granule stays at 0 and only fills leftover budget. */
+    for (int wi = 0; wi < pact->n_workloads; wi++) {
+        pac_table_t *table = pact->workloads[wi].pac_table;
+        pid_t pid = pact->workloads[wi].target_pid;
+        if (!table || pid <= 0 || pact->workloads[wi].exited) {
             continue;
         }
-        uint64_t granule = meta->page_addr & st->granule_mask;
-        rerank_granule_t *g = rerank_get_or_add(st, granule);
-        if (!g) {
-            continue;
+        khint_t k;
+        kh_foreach(table, k)
+        {
+            pac_metadata_t *meta = kh_val(table, k);
+            if (!meta || meta->pac_value == 0) {
+                continue;
+            }
+            uint64_t granule = meta->page_addr & st->granule_mask;
+            rerank_granule_t *g = rerank_get_or_add(st, pid, granule);
+            if (!g) {
+                continue;
+            }
+            g->score += page_score(pact, meta);
+            if (g->n_pages < UINT32_MAX) {
+                g->n_pages++;
+            }
         }
-        g->score += page_score(pact, meta);
-        /* Placement comes from move_pages majority below, not meta->tier.
-         * Under userspace, meta->tier is placement-only (updated on migrate);
-         * PEBS local/remote must not overwrite it (see apply_sample_to_meta). */
     }
 }
 
@@ -252,22 +383,29 @@ static int cmp_rank(const void *a, const void *b)
     if (x->granule > y->granule) {
         return 1;
     }
+    if (x->pid != y->pid) {
+        return (x->pid > y->pid) - (x->pid < y->pid);
+    }
     return 0;
 }
 
-static pac_metadata_t *lookup_meta(pact_context_t *pact, uint64_t page)
+static pac_metadata_t *lookup_meta(pact_context_t *pact, pid_t pid, uint64_t page)
 {
-    khint_t k = pac_table_get(pact->workload->pac_table, page);
-    if (k == kh_end(pact->workload->pac_table)) {
+    pact_workload_t *wl = pact_wl_find(pact, pid);
+    if (!wl || !wl->pac_table) {
         return NULL;
     }
-    return kh_val(pact->workload->pac_table, k);
+    khint_t k = pac_table_get(wl->pac_table, page);
+    if (k == kh_end(wl->pac_table)) {
+        return NULL;
+    }
+    return kh_val(wl->pac_table, k);
 }
 
 static uint32_t enqueue_granule(pact_context_t *pact, rerank_granule_t *g, int target,
                                 uint32_t left)
 {
-    if (left == 0) {
+    if (left == 0 || pact_wl_exited(pact, g->pid)) {
         return 0;
     }
     uint64_t n4k = pact->granule_bytes / PAGE_SIZE;
@@ -278,30 +416,71 @@ static uint32_t enqueue_granule(pact_context_t *pact, rerank_granule_t *g, int t
     if (want > left) {
         want = left;
     }
+    char pm[64];
+    snprintf(pm, sizeof(pm), "/proc/%d/pagemap", (int)g->pid);
+    int pfd = open(pm, O_RDONLY);
     uint32_t pushed = 0;
-    for (uint32_t i = 0; i < want; i++) {
-        uint64_t page = g->granule + (uint64_t)i * PAGE_SIZE;
-        pac_metadata_t *meta = lookup_meta(pact, page);
-        if (!pact_enqueue_move(pact, meta, page, target)) {
-            break;
+    /* Skip pages already on `target`, so a half-remote granule only spends
+     * quota on the half that actually has to move. */
+    enum { CHUNK = 64 };
+    void *pages[CHUNK];
+    int status[CHUNK];
+    uint64_t addrs[CHUNK];
+    uint32_t filled = 0;
+    int stop = 0;
+
+    for (uint32_t i = 0; i <= n4k && pushed < want && !stop; i++) {
+        int flush = (i == n4k) || (filled == CHUNK);
+        if (!flush && i < n4k) {
+            uint64_t page = g->granule + (uint64_t)i * PAGE_SIZE;
+            if (pfd >= 0 && !pagemap_present(pfd, page)) {
+                continue;
+            }
+            pages[filled] = (void *)page;
+            addrs[filled] = page;
+            filled++;
+            flush = (filled == CHUNK);
         }
-        pushed++;
+        if (!flush || filled == 0) {
+            continue;
+        }
+        int qok = (g->pid > 0 &&
+                   numa_move_pages(g->pid, (int)filled, pages, NULL, status, 0) == 0);
+        for (uint32_t j = 0; j < filled && pushed < want; j++) {
+            if (qok && (status[j] < 0 || status[j] == target)) {
+                continue;
+            }
+            pac_metadata_t *meta = lookup_meta(pact, g->pid, addrs[j]);
+            if (!pact_enqueue_move(pact, meta, addrs[j], target, g->pid)) {
+                stop = 1;
+                break;
+            }
+            pushed++;
+        }
+        filled = 0;
+    }
+    if (pfd >= 0) {
+        close(pfd);
     }
     if (pushed > 0) {
         g->in_flight = 1;
+        pact_workload_t *owner = pact_wl_find(pact, g->pid);
+        if (!owner || owner->exited) {
+            return pushed;
+        }
         if (target == 0) {
-            pact->workload->stats.rerank_enqueued_promote += pushed;
+            owner->stats.rerank_enqueued_promote += pushed;
         } else {
-            pact->workload->stats.rerank_enqueued_demote += pushed;
+            owner->stats.rerank_enqueued_demote += pushed;
         }
     }
     return pushed;
 }
 
-static void rerank_refresh_nodes(pact_context_t *pact, rerank_state_t *st, mco_coro *co)
+/* Eight 4KB samples, one syscall. Blocks if a sampled page is mid-migration. */
+static void rerank_refresh_granule(rerank_granule_t *g, uint64_t granule_bytes)
 {
-    pid_t pid = pact->workload->target_pid;
-    uint64_t n4k = pact->granule_bytes / PAGE_SIZE;
+    uint64_t n4k = granule_bytes / PAGE_SIZE;
     if (n4k < 1) {
         n4k = 1;
     }
@@ -309,41 +488,111 @@ static void rerank_refresh_nodes(pact_context_t *pact, rerank_state_t *st, mco_c
     if (step < 1) {
         step = 1;
     }
+    /* 512/8 = 64, an even stride. With 4KB interleave every even page is the
+     * same node, so all 8 samples agree and the remote half is invisible. */
+    if ((step & 1ULL) == 0 && step > 1) {
+        step--;
+    }
 
-    uint64_t n = 0;
+    void *pages[RERANK_NODE_SAMPLES];
+    int status[RERANK_NODE_SAMPLES];
+    int nq = 0;
+    for (uint64_t i = 0; i < n4k && nq < (int)RERANK_NODE_SAMPLES; i += step) {
+        pages[nq++] = (void *)(g->granule + i * PAGE_SIZE);
+    }
+    memset(status, 0xff, sizeof(status));
+    if (g->pid <= 0 || nq == 0) {
+        return;
+    }
+    if (numa_move_pages(g->pid, nq, pages, NULL, status, 0) != 0) {
+        return;
+    }
+    int n0 = 0, n1 = 0;
+    for (int j = 0; j < nq; j++) {
+        if (status[j] == 0) {
+            n0++;
+        } else if (status[j] == 1) {
+            n1++;
+        }
+    }
+    if (n0 + n1 == 0) {
+        return;
+    }
+    if (n0 > 0 && n1 > 0) {
+        g->node = RERANK_NODE_MIXED;
+    } else {
+        g->node = (int8_t)(n0 > 0 ? RERANK_NODE_FAST : RERANK_NODE_SLOW);
+    }
+    uint64_t est = ((uint64_t)(n0 + n1) * n4k) / (uint64_t)nq;
+    if (est < 1) {
+        est = 1;
+    }
+    if (est > n4k) {
+        est = n4k;
+    }
+    g->present = (uint16_t)est;
+}
+
+/* Query on the rerank coroutine: a blocking syscall intentionally stalls
+ * control, while sampling continues on its own thread. */
+static void rerank_refresh_nodes(pact_context_t *pact, rerank_state_t *st, mco_coro *co)
+{
+    uint32_t visited = 0;
     khint_t k;
     kh_foreach(st->table, k)
     {
+        if (!pact->running) {
+            return;
+        }
         rerank_granule_t *g = kh_val(st->table, k);
-        if (!g || g->in_flight) {
-            continue;
+        if (g && !g->in_flight && g->pid > 0 && !pact_wl_exited(pact, g->pid)) {
+            rerank_refresh_granule(g, st->granule_bytes);
         }
-
-        void *pages[RERANK_NODE_SAMPLES];
-        int status[RERANK_NODE_SAMPLES];
-        int nq = 0;
-        for (uint64_t i = 0; i < n4k && nq < (int)RERANK_NODE_SAMPLES; i += step) {
-            pages[nq++] = (void *)(g->granule + i * PAGE_SIZE);
-        }
-        memset(status, 0xff, sizeof(status));
-        if (numa_move_pages(pid, nq, pages, NULL, status, 0) == 0) {
-            int n0 = 0, n1 = 0;
-            for (int j = 0; j < nq; j++) {
-                if (status[j] == 0) {
-                    n0++;
-                } else if (status[j] == 1) {
-                    n1++;
-                }
-            }
-            if (n0 + n1 > 0) {
-                g->node = (int8_t)(n0 >= n1 ? 0 : 1);
-            }
-        }
-
-        if (co && (++n % 2048) == 0) {
+        if (++visited % 2048 == 0) {
             mco_yield(co);
         }
     }
+}
+
+static void rerank_log_rank(pact_context_t *pact, rerank_granule_t **rank, uint32_t n,
+                            uint64_t k)
+{
+    for (int wi = 0; wi < pact->n_workloads; wi++) {
+        pid_t pid = pact->workloads[wi].target_pid;
+        if (pid <= 0) {
+            continue;
+        }
+        uint32_t scored = 0, kept = 0;
+        double mn = 0.0, mx = 0.0, sum = 0.0;
+        for (uint32_t i = 0; i < n; i++) {
+            if (rank[i]->pid != pid || rank[i]->score <= 0.0) {
+                continue;
+            }
+            if (scored == 0 || rank[i]->score < mn) {
+                mn = rank[i]->score;
+            }
+            if (rank[i]->score > mx) {
+                mx = rank[i]->score;
+            }
+            sum += rank[i]->score;
+            scored++;
+            if ((uint64_t)i < k) {
+                kept++;
+            }
+        }
+        log_info("rerank_score",
+                 "pid=%d scored_g=%u kept_g=%u min=%.0f max=%.0f sum=%.0f",
+                 (int)pid, scored, kept, mn, mx, sum);
+    }
+    if (n == 0 || k == 0) {
+        return;
+    }
+    uint32_t cut = (uint32_t)((k < n) ? k - 1 : n - 1);
+    rerank_granule_t *g = rank[cut];
+    log_info("rerank_cut",
+             "rank=%u pid=%d granule=0x%lx score=%.0f node=%d pages=%u K=%lu",
+             cut, (int)g->pid, (unsigned long)g->granule, g->score, (int)g->node,
+             g->n_pages, (unsigned long)k);
 }
 
 static void rerank_enforce(pact_context_t *pact, mco_coro *co)
@@ -353,21 +602,27 @@ static void rerank_enforce(pact_context_t *pact, mco_coro *co)
         return;
     }
 
-    ring_buffer_migration_entry_t *ring = pact->workload->migration_ring;
-    if (ring && ring_buffer_migration_entry_size(ring) > (MIGRATION_RING_DEFAULT_SIZE / 4)) {
-        log_debug("rerank_enforce", "ring still draining (%u); skip epoch",
-                  ring_buffer_migration_entry_size(ring));
-        return;
+    for (int i = 0; i < pact->n_workloads; i++) {
+        if (pact->workloads[i].exited) {
+            continue;
+        }
+        ring_buffer_migration_entry_t *ring = pact->workloads[i].migration_ring;
+        if (ring && ring_buffer_migration_entry_size(ring) > (MIGRATION_RING_DEFAULT_SIZE / 4)) {
+            log_debug("rerank_enforce", "ring still draining (%u); skip epoch",
+                      ring_buffer_migration_entry_size(ring));
+            return;
+        }
     }
 
     /* Zero scores then re-merge so a page that cooled / stopped sampling
-     * does not keep a stale high rank. Seeded-only granules stay at 0. */
+     * does not keep a stale high rank. Unsampled granules stay at 0. */
     khint_t k;
     kh_foreach(st->table, k)
     {
         rerank_granule_t *g = kh_val(st->table, k);
         if (g) {
             g->score = 0.0;
+            g->n_pages = 0;
             /* One-epoch sticky: a granule enqueued last tick is eligible again. */
             g->in_flight = 0;
         }
@@ -382,6 +637,9 @@ static void rerank_enforce(pact_context_t *pact, mco_coro *co)
 
     rerank_merge_scores(pact, st);
     rerank_refresh_nodes(pact, st, co);
+    if (!pact->running) {
+        return;
+    }
 
     uint32_t n = kh_size(st->table);
     if (n == 0) {
@@ -403,23 +661,29 @@ static void rerank_enforce(pact_context_t *pact, mco_coro *co)
     n = i;
     qsort(rank, n, sizeof(*rank), cmp_rank);
 
-    uint64_t budget = (uint64_t)(pact->fast_tier_frac * (double)st->node0_pages_4k);
-    uint64_t pages_per = pact->granule_bytes / PAGE_SIZE;
-    if (pages_per < 1) {
-        pages_per = 1;
+    uint64_t configured = (uint64_t)(pact->fast_tier_frac * (double)st->node0_pages_4k);
+    uint64_t workload_fast = 0;
+    if (!read_workload_fast_4k(pact, &workload_fast)) {
+        log_warning("rerank_budget", "cannot read workload residency; skip epoch");
+        free(rank);
+        return;
     }
-    st->k_granules = budget / pages_per;
-    if (st->k_granules < 1) {
-        st->k_granules = 1;
-    }
-    if (st->k_granules > n) {
-        st->k_granules = n;
-    }
+    uint64_t node_free = read_node0_free_4k();
+    uint64_t budget = usable_budget_4k(configured, workload_fast, node_free,
+                                      RERANK_PROMOTE_HEADROOM_4K);
+    /* K is "keep adding granules until resident 4K pages reach C".
+     * Counting granules as dense 2MB locked PC at 2GB of a 5.3GB sparse
+     * btree (20260922f: promo_g=0, k_wl0=2048, NUMA stuck at 2018MB). */
+    uint64_t kept = 0;
+    st->k_granules = rank_prefix(rank, n, budget, &kept);
+
+    rerank_log_rank(pact, rank, n, st->k_granules);
 
     for (i = 0; i < n; i++) {
         if (i < st->k_granules) {
             rank[i]->miss_epochs = 0;
-        } else if (rank[i]->node == 0) {
+        } else if (rank[i]->node == RERANK_NODE_FAST ||
+                   rank[i]->node == RERANK_NODE_MIXED) {
             if (rank[i]->miss_epochs < 255) {
                 rank[i]->miss_epochs++;
             }
@@ -430,14 +694,23 @@ static void rerank_enforce(pact_context_t *pact, mco_coro *co)
 
     uint32_t left = pact->rerank_migrate_limit;
     uint32_t ndemo = 0, npromo = 0;
+    /* Reserve half the epoch for promote. Otherwise a ranking swap
+     * demotes 512 granules, burns migrate_limit, and C drains for an
+     * epoch (PC 20260922e: demo_g=512 promo_g=0). */
+    uint32_t demo_budget = left / 2;
 
     /* Demote first: free node0 before promotions try to allocate there. */
-    for (i = (uint32_t)st->k_granules; i < n && left > 0; i++) {
+    for (i = (uint32_t)st->k_granules; i < n && demo_budget > 0; i++) {
         rerank_granule_t *g = rank[i];
-        if (g->node != 0 || g->miss_epochs < RERANK_HYST_EPOCHS) {
+        /* Fast or mixed: some pages still occupy node0 and this granule
+         * is outside the keep set. Mixed pages already on node1 are skipped
+         * inside enqueue_granule. */
+        if (pact_wl_exited(pact, g->pid) || g->miss_epochs < RERANK_HYST_EPOCHS ||
+            (g->node != RERANK_NODE_FAST && g->node != RERANK_NODE_MIXED)) {
             continue;
         }
-        uint32_t got = enqueue_granule(pact, g, 1, left);
+        uint32_t got = enqueue_granule(pact, g, 1, demo_budget);
+        demo_budget -= got;
         left -= got;
         if (got) {
             ndemo++;
@@ -462,7 +735,8 @@ static void rerank_enforce(pact_context_t *pact, mco_coro *co)
         }
         for (i = 0; i < st->k_granules && promo_cap > 0; i++) {
             rerank_granule_t *g = rank[i];
-            if (g->node != 1) {
+            if (pact_wl_exited(pact, g->pid) ||
+                (g->node != RERANK_NODE_SLOW && g->node != RERANK_NODE_MIXED)) {
                 continue;
             }
             uint32_t got = enqueue_granule(pact, g, 0, promo_cap);
@@ -478,10 +752,21 @@ static void rerank_enforce(pact_context_t *pact, mco_coro *co)
     pact->workload->stats.rerank_tracked = n;
     pact->workload->stats.rerank_k = st->k_granules;
 
+    int k_wl[PACT_MAX_WORKLOADS];
+    memset(k_wl, 0, sizeof(k_wl));
+    for (i = 0; i < st->k_granules && i < n; i++) {
+        int wi = pact_wl_index(pact, rank[i]->pid);
+        if (wi >= 0) {
+            k_wl[wi]++;
+        }
+    }
     log_info("rerank_enforce",
-             "tracked=%u K=%lu demo_g=%u promo_g=%u left=%u node0_4k=%lu frac=%.2f granule=%lu",
-             n, st->k_granules, ndemo, npromo, left, st->node0_pages_4k, pact->fast_tier_frac,
-             st->granule_bytes);
+             "tracked=%u K=%lu kept_4k=%lu demo_g=%u promo_g=%u left=%u frac=%.2f "
+             "k_wl0=%d k_wl1=%d configured_4k=%lu budget_4k=%lu "
+             "workload_fast_4k=%lu free_4k=%lu reserve_4k=%lu",
+             n, st->k_granules, kept, ndemo, npromo, left, pact->fast_tier_frac,
+             k_wl[0], k_wl[1], configured, budget, workload_fast, node_free,
+             RERANK_PROMOTE_HEADROOM_4K);
 
     free(rank);
     (void)co;

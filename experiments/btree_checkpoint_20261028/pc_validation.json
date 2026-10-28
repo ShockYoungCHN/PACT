@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "checks": {
+    "only_rerank_logic_change_is_promotion_guard": true,
+    "canonical_backend_matches": true,
+    "workloads_and_pc_maps_unchanged": true,
+    "class_weights_unchanged": true,
+    "pact_main_unchanged": true,
+    "runtime_source_changes_limited_to_rerank": true,
+    "metadata_unchanged": true,
+    "zero_additional_reserve": true,
+    "regression_test_passed": true
+  },
+  "base_build": "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/btree_ratio_grid/build.page4k_tuned_20261027",
+  "runtime": "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/btree_ratio_grid/build.page4k_tuned_positive_20261027/runtime/pact",
+  "runtime_sha256": "6d06765df6550f641a14372e347501f091b786fc61bf39be03602e60d515f8e1",
+  "test_source_sha256": "3ba952d39d41d6bd77b0456ed69931091b28178e65be46f1d902f26861e852d1",
+  "unit_stdout": "PASS: page identity, ranking, PFN ranges, exact4KiB enqueue/quota; zero/negative-score promotion blocked, positive promotion and zero-score demotion allowed\n",
+  "test_scope": "Real enqueue code with mocked NUMA residency and migration queue;checks zero/negative promotion rejection,positive promotion and zero-score demotion. No throughput experiment or actual migration run."
+}

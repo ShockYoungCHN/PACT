@@ -83,38 +83,40 @@ void calculate_quartiles(reservoir_t *r, double *q1, double *q3)
 
 void update_bin_width(pact_context_t *pact)
 {
-    pact_workload_t *wl = pact->workload;
-    binning_state_t *bin = wl->binning;
-
-    double q1, q3;
-    calculate_quartiles(wl->reservoir, &q1, &q3);
-    if (q3 <= q1) {
-        return;
-    }
-
-    size_t n = kh_size(wl->pac_table);
-    if (n == 0) {
-        return;
-    }
-
-    double iqr = q3 - q1;
-    double n_cbrt = cbrt((double)n);
-    double new_width = 2.0 * iqr / n_cbrt;
-
-    bin->q1 = q1;
-    bin->q3 = q3;
-
-    /* Pressure adjust (Algorithm 3): scale up if the table is much
-     * larger than the promotion-candidate set (most pages cold → widen
-     * bins to compress the long tail). N_c is the migration ring fill. */
-    size_t n_c = wl->migration_ring ? ring_buffer_migration_entry_size(wl->migration_ring) : 0;
-    if (n_c > 0) {
-        if ((double)n / (double)n_c > PACT_BINNING_TH_SCALE) {
-            new_width = 2 * new_width;
-        } else {
-            new_width = new_width / 2;
+    for (int wi = 0; wi < pact->n_workloads; wi++) {
+        pact_workload_t *wl = &pact->workloads[wi];
+        binning_state_t *bin = wl->binning;
+        if (!bin || !wl->reservoir || !wl->pac_table) {
+            continue;
         }
+
+        double q1, q3;
+        calculate_quartiles(wl->reservoir, &q1, &q3);
+        if (q3 <= q1) {
+            continue;
+        }
+
+        size_t n = kh_size(wl->pac_table);
+        if (n == 0) {
+            continue;
+        }
+
+        double iqr = q3 - q1;
+        double n_cbrt = cbrt((double)n);
+        double new_width = 2.0 * iqr / n_cbrt;
+
+        bin->q1 = q1;
+        bin->q3 = q3;
+
+        size_t n_c = wl->migration_ring ? ring_buffer_migration_entry_size(wl->migration_ring) : 0;
+        if (n_c > 0) {
+            if ((double)n / (double)n_c > PACT_BINNING_TH_SCALE) {
+                new_width = 2 * new_width;
+            } else {
+                new_width = new_width / 2;
+            }
+        }
+        bin->bin_width = new_width;
+        bin->last_update = rdtsc();
     }
-    bin->bin_width = new_width;
-    bin->last_update = rdtsc();
 }

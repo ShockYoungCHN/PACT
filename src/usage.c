@@ -41,14 +41,14 @@ void pact_print_usage(const char *prog_name)
            "thread, all on\none dedicated core — PACT manages the whole workload "
            "at a cost of one core.\n");
 
-    printf("\nUsage: %s --workload PID [options]\n", prog_name);
+    printf("\nUsage: %s --workload PID [--workload PID ...] [options]\n", prog_name);
     printf("PACT attaches to an already-running, externally CPU-pinned workload "
            "and must run\nas root (PMU/PEBS access). See run/run-pact.sh for the "
            "full experiment harness.\n");
 
     printf("\nRequired:\n");
-    printf("  --workload PID                    Target process to manage "
-           "(pin it externally, e.g. taskset).\n");
+    printf("  --workload PID                    Target process (repeatable; "
+           "shared fast-tier budget C).\n");
 
     printf("\nPAC + migration tuning:\n");
     printf("  --pebs-period N                   PEBS sample period: 1 sample per N "
@@ -84,9 +84,8 @@ void pact_print_usage(const char *prog_name)
     printf("  --class-weights PATH              Calibrated class weights JSON "
            "(with --pc-class-map).\n");
     printf("  --pc-class-map PATH               Offline PC offset→class map "
-           "(with --class-weights).\n");
-    printf("                                    Both required to enable PC-class "
-           "PAC scaling; map keys\n");
+           "(repeatable; one per --workload).\n");
+    printf("                                    Pair with --class-weights; map keys\n");
     printf("                                    are main-binary file offsets "
            "(PIE-safe).\n");
     printf("  --score-mode MODE                 Page-criticality scoring policy "

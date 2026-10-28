@@ -62,7 +62,7 @@ void pc_class_set_text_base(pc_class_state_t *st, uint64_t base, uint64_t end);
  * Result is clamped to pac_value_max (typically PAC_VALUE_MAX).
  * Used by --score-mode pac+pc.
  */
-uint32_t scale_by_pc_class(struct pact_context *ctx, uint64_t ip, uint32_t attributed,
+uint32_t scale_by_pc_class(struct pact_context *ctx, pid_t pid, uint64_t ip, uint32_t attributed,
                            uint32_t pac_value_max);
 
 /*
@@ -70,7 +70,7 @@ uint32_t scale_by_pc_class(struct pact_context *ctx, uint64_t ip, uint32_t attri
  * model. Accumulated per page this is score = Σ_c w_c · samples_c. Returns 0
  * when disabled. Used by --score-mode pc. Clamped to pac_value_max.
  */
-uint32_t pc_class_score(struct pact_context *ctx, uint64_t ip, uint32_t pac_value_max);
+uint32_t pc_class_score(struct pact_context *ctx, pid_t pid, uint64_t ip, uint32_t pac_value_max);
 
 /* Periodic diagnostics (rate-limited). */
 void pc_class_log_stats(const pc_class_state_t *st);

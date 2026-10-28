@@ -242,13 +242,22 @@ static void handle_tier_change(pact_context_t *pact, pac_metadata_t *meta, uint8
     }
 }
 
-/* Resolve the workload's pac_table / reservoir / binning in one call. */
-static inline void pac_resolve_workload_data(pact_context_t *pact, pac_table_t **table,
-                                             reservoir_t **res, binning_state_t **bin)
+/* Resolve the owning workload's pac_table / reservoir / binning. */
+static inline pact_workload_t *pac_resolve_workload_data(pact_context_t *pact, pid_t pid,
+                                                         pac_table_t **table, reservoir_t **res,
+                                                         binning_state_t **bin)
 {
-    *table = pact->workload->pac_table;
-    *res = pact->workload->reservoir;
-    *bin = pact->workload->binning;
+    pact_workload_t *wl = pact_wl_find(pact, pid);
+    if (!wl) {
+        *table = NULL;
+        *res = NULL;
+        *bin = NULL;
+        return NULL;
+    }
+    *table = wl->pac_table;
+    *res = wl->reservoir;
+    *bin = wl->binning;
+    return wl;
 }
 
 /* Cold first-sight branch — keep out-of-line to avoid bloating the hot path. */
@@ -316,7 +325,10 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
     pac_table_t *table;
     reservoir_t *res;
     binning_state_t *bin;
-    pac_resolve_workload_data(pact, &table, &res, &bin);
+    pact_workload_t *wl = pac_resolve_workload_data(pact, pid, &table, &res, &bin);
+    if (!wl || !table) {
+        return;
+    }
 
     khint_t k = pac_table_get(table, page_addr);
     pac_metadata_t *meta;
@@ -336,7 +348,11 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
 
     apply_sample_to_meta(pact, meta, stalls, tier);
 
-    pact->workload->stats.pac_updates += 1;
+    wl->stats.pac_updates += 1;
+    if (wl->exited) {
+        wl->stats.avg_pac = (wl->stats.avg_pac * 15 + meta->pac_value) >> 4;
+        return;
+    }
 
     /* pc-mode ONLY: log-compress the accumulated score for BINNING (ranking-preserving).
      * pc's C1..C3 weight span (16 vs 0.05 = 320x) + 18-bit saturation give a multi-modal,
@@ -354,15 +370,14 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
         bin_index = (size_t)(pv / bin->bin_width);
     }
     const char *tier_str = (meta->tier == 0) ? "fast" : (meta->tier == 1) ? "slow" : "unknown";
-    log_pac_update(pact, "update_pac_entry", pact->workload ? 0 : -1, page_addr, meta->pac_value,
+    log_pac_update(pact, "update_pac_entry", pact_wl_index(pact, pid), page_addr, meta->pac_value,
                    tier_str, bin_index);
 
     reservoir_add_sample(res, pv);
 
     /* Userspace rerank owns placement (promote and demote). PEBS only scores. */
     if (pact->demotion_policy == DEMOTION_USERSPACE) {
-        pact->workload->stats.avg_pac =
-            (pact->workload->stats.avg_pac * 15 + meta->pac_value) >> 4;
+        wl->stats.avg_pac = (wl->stats.avg_pac * 15 + meta->pac_value) >> 4;
         return;
     }
 
@@ -382,9 +397,9 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
         if (target >= 0 && !meta->migrating) {
             meta->migrating = true;
             migration_entry_t entry = {.meta = meta, .target_node = target};
-            if (ring_buffer_migration_entry_push(pact->workload->migration_ring, entry)) {
+            if (ring_buffer_migration_entry_push(wl->migration_ring, entry)) {
                 if (target == 0) {
-                    atomic_inc_relaxed(&pact->workload->stats.promotion_attempts);
+                    atomic_inc_relaxed(&wl->stats.promotion_attempts);
                 }
             } else {
                 meta->migrating = false; /* ring full — retry next sample */
@@ -395,23 +410,27 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
                && !meta->migrating) {
         /* Baseline pac (and pc without capacity set): strict top-bin promotion, unchanged. */
         meta->migrating = true;
-        ring_buffer_migration_entry_t *ring = pact->workload->migration_ring;
+        ring_buffer_migration_entry_t *ring = wl->migration_ring;
         migration_entry_t entry = {.meta = meta, .target_node = 0};
         if (ring_buffer_migration_entry_push(ring, entry)) {
-            atomic_inc_relaxed(&pact->workload->stats.promotion_attempts);
+            atomic_inc_relaxed(&wl->stats.promotion_attempts);
         } else {
             meta->migrating = false;
         }
     }
 
     /* EMA of avg PAC for optimization heuristics. */
-    pact->workload->stats.avg_pac = (pact->workload->stats.avg_pac * 15 + meta->pac_value) >> 4;
+    wl->stats.avg_pac = (wl->stats.avg_pac * 15 + meta->pac_value) >> 4;
 }
 
 bool pact_enqueue_move(pact_context_t *pact, pac_metadata_t *meta, uint64_t page_addr,
-                       int target_node)
+                       int target_node, pid_t pid)
 {
-    if (!pact || !pact->workload || !pact->workload->migration_ring) {
+    if (!pact) {
+        return false;
+    }
+    pact_workload_t *wl = pact_wl_find(pact, pid);
+    if (!wl || wl->exited || !wl->migration_ring) {
         return false;
     }
     if (meta && meta->migrating) {
@@ -425,14 +444,14 @@ bool pact_enqueue_move(pact_context_t *pact, pac_metadata_t *meta, uint64_t page
         .page_addr = page_addr & PAGE_MASK,
         .target_node = target_node,
     };
-    if (!ring_buffer_migration_entry_push(pact->workload->migration_ring, entry)) {
+    if (!ring_buffer_migration_entry_push(wl->migration_ring, entry)) {
         if (meta) {
             meta->migrating = false;
         }
         return false;
     }
     if (target_node == 0) {
-        atomic_inc_relaxed(&pact->workload->stats.promotion_attempts);
+        atomic_inc_relaxed(&wl->stats.promotion_attempts);
     }
     return true;
 }
@@ -655,12 +674,27 @@ static bool mig_add_entry_to_batch(const migration_entry_t *entry, void **pages,
     return true;
 }
 
-/* Drain the workload's migration ring. */
-static int mig_drain_workload_ring(pact_context_t *ctx, void **pages, int *nodes, int *status,
-                                   pac_metadata_t **metas, int max_batch)
+/* Drain one workload's migration ring. */
+static int mig_drain_workload_ring(pact_context_t *ctx, pact_workload_t *wl, void **pages,
+                                   int *nodes, int *status, pac_metadata_t **metas, int max_batch)
 {
-    pact_workload_t *wl = ctx->workload;
+    if (!wl || !wl->migration_ring) {
+        return 0;
+    }
     ring_buffer_migration_entry_t *ring = wl->migration_ring;
+    /* Dead tenant: drop queued moves so the ring cannot pin rerank, and
+     * never numa_move_pages those VAs under a surviving pid. */
+    if (wl->exited || wl->target_pid <= 0) {
+        migration_entry_t entry;
+        int dropped = 0;
+        while (ring_buffer_migration_entry_pop(ring, &entry)) {
+            if (entry.meta) {
+                entry.meta->migrating = false;
+            }
+            dropped++;
+        }
+        return dropped;
+    }
     pid_t wl_pid = wl->target_pid;
     int wl_migrated = 0;
 
@@ -718,10 +752,12 @@ static void *migration_thread_fn(void *arg)
             next_balance_tsc = rdtsc() + balance_interval_tsc;
         }
 
-        ring_buffer_migration_entry_t *ring = ctx->workload->migration_ring;
-        if (ring_buffer_migration_entry_size(ring) > 0) {
-            (void)mig_drain_workload_ring(ctx, pages, nodes, status, metas, max_batch);
-        } else {
+        int drained = 0;
+        for (int i = 0; i < ctx->n_workloads; i++) {
+            drained += mig_drain_workload_ring(ctx, &ctx->workloads[i], pages, nodes, status,
+                                               metas, max_batch);
+        }
+        if (drained == 0) {
             _mm_pause(); /* CPU hint vs 100µs kernel sleep */
         }
     }
@@ -736,10 +772,12 @@ static void *migration_thread_fn(void *arg)
 
 static int alloc_workload_migration_ring(pact_context_t *ctx, size_t ring_size)
 {
-    ctx->workload->migration_ring = ring_buffer_migration_entry_create(ring_size);
-    if (!ctx->workload->migration_ring) {
-        log_error("init_migration_thread", "Failed to create workload migration ring");
-        return -1;
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        ctx->workloads[i].migration_ring = ring_buffer_migration_entry_create(ring_size);
+        if (!ctx->workloads[i].migration_ring) {
+            log_error("init_migration_thread", "Failed to create migration ring for wl %d", i);
+            return -1;
+        }
     }
     return 0;
 }
@@ -757,11 +795,16 @@ static int init_migration_thread(pact_context_t *ctx)
     if (pthread_create(&ctx->migration_thread, NULL, migration_thread_fn, ctx) != 0) {
         log_error("init_migration_thread", "Failed to create migration thread: %s",
                   strerror(errno));
-        ring_buffer_migration_entry_destroy(ctx->workload->migration_ring);
-        ctx->workload->migration_ring = NULL;
+        for (int i = 0; i < ctx->n_workloads; i++) {
+            if (ctx->workloads[i].migration_ring) {
+                ring_buffer_migration_entry_destroy(ctx->workloads[i].migration_ring);
+                ctx->workloads[i].migration_ring = NULL;
+            }
+        }
         return -1;
     }
-    log_info("init_migration_thread", "Migration thread initialized (ring size: %zu)", ring_size);
+    log_info("init_migration_thread", "Migration thread initialized (ring size: %zu, wls=%d)",
+             ring_size, ctx->n_workloads);
     return 0;
 }
 
@@ -778,15 +821,42 @@ static void cleanup_migration_thread(pact_context_t *ctx)
     /* Wait for thread to finish */
     pthread_join(ctx->migration_thread, NULL);
 
-    /* Cleanup ring buffer */
-    if (ctx->workload->migration_ring) {
-        ring_buffer_migration_entry_destroy(ctx->workload->migration_ring);
-        ctx->workload->migration_ring = NULL;
+    /* Cleanup ring buffers */
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        if (ctx->workloads[i].migration_ring) {
+            ring_buffer_migration_entry_destroy(ctx->workloads[i].migration_ring);
+            ctx->workloads[i].migration_ring = NULL;
+        }
     }
 
     log_info("cleanup_migration_thread", "Migration thread cleaned up");
 }
 
+
+static int init_sampling_thread(pact_context_t *ctx)
+{
+    if (!ctx->pebs_available || !ctx->pebs_aggregator) {
+        return 0;
+    }
+    int rc = pthread_create(&ctx->sampling_thread, NULL, pebs_sampling_thread, ctx);
+    if (rc != 0) {
+        log_error("init_sampling_thread", "Failed to create sampling thread: %s", strerror(rc));
+        return -1;
+    }
+    ctx->sampling_thread_joinable = true;
+    log_info("init_sampling_thread", "PEBS sampling thread initialized");
+    return 0;
+}
+
+/* Called only from the control thread, outside all coroutines. */
+static void cleanup_sampling_thread(pact_context_t *ctx)
+{
+    ctx->running = false;
+    if (ctx->sampling_thread_joinable) {
+        pthread_join(ctx->sampling_thread, NULL);
+        ctx->sampling_thread_joinable = false;
+    }
+}
 
 /* Earliest deadline across all timed event-loop work. Used to size the idle
  * sleep so we wake exactly when the next coroutine (or the 1Hz target-alive
@@ -795,6 +865,9 @@ static uint64_t next_deadline_tsc(const pact_context_t *pact)
 {
     uint64_t earliest = pact->targets_alive_next_tsc;
     for (coro_type_t t = 0; t < CORO_TYPE_MAX; t++) {
+        if (t == CORO_TYPE_PEBS) {
+            continue;
+        }
         uint64_t d = pact->timing[t].next_tsc;
         if (d && d < earliest) {
             earliest = d;
@@ -814,12 +887,7 @@ static uint64_t next_deadline_tsc(const pact_context_t *pact)
  *
  * Callers should mco_yield() when this returns true, then resume the drain on
  * the next tick. The deadline-first sleep in run_pact_event_loop guarantees
- * we'll wake promptly to finish.
- *
- * Note: deliberately not used by pebs_aggregator_coroutine — the per-cycle
- * PMU stop/read/start sequence around pebs_aggregate_events makes mid-cycle
- * yields unsafe (we would lose samples that arrive in the gap). Empirically
- * one cycle is sub-20us, so it doesn't need this. */
+ * we'll wake promptly to finish. Sampling runs on a separate thread. */
 static inline bool coro_should_yield(const pact_context_t *pact, coro_type_t self)
 {
     uint64_t now = rdtsc();
@@ -828,7 +896,7 @@ static inline bool coro_should_yield(const pact_context_t *pact, coro_type_t sel
         return true;
     }
     for (coro_type_t t = 0; t < CORO_TYPE_MAX; t++) {
-        if (t == self) {
+        if (t == self || t == CORO_TYPE_PEBS) {
             continue;
         }
         uint64_t d = pact->timing[t].next_tsc;
@@ -842,11 +910,11 @@ static inline bool coro_should_yield(const pact_context_t *pact, coro_type_t sel
     return false;
 }
 
-/* Apply one encoded PEBS sample from the PAC ring to the workload's table. */
-static inline void apply_encoded_pac_sample(pact_context_t *ctx, uint64_t encoded)
+/* Apply one encoded PEBS sample from the PAC ring to the owning workload. */
+static inline void apply_encoded_pac_sample(pact_context_t *ctx, uint64_t encoded, pid_t pid)
 {
     update_pac_entry(ctx, PEBS_DECODE_PAGE(encoded), PEBS_DECODE_PAC(encoded),
-                     PEBS_DECODE_TIER(encoded), ctx->workload->target_pid);
+                     PEBS_DECODE_TIER(encoded), pid);
 }
 
 static void adaptive_coroutine(mco_coro *co)
@@ -859,14 +927,15 @@ static void adaptive_coroutine(mco_coro *co)
          * other coroutines. After each batch, check coro_should_yield() and
          * mco_yield() if any other deadline has slipped — we'll be rescheduled
          * one event-loop iteration later and pick up where we left off. */
-        while (ring_buffer_uint64_size(ctx->pac_update_ring) > 0) {
-            uint64_t pages[PAC_DRAIN_BATCH];
-            int count = ring_buffer_uint64_pop_batch(ctx->pac_update_ring, pages, PAC_DRAIN_BATCH);
+        while (ring_buffer_pac_update_size(ctx->pac_update_ring) > 0) {
+            pac_update_t pages[PAC_DRAIN_BATCH];
+            int count =
+                ring_buffer_pac_update_pop_batch(ctx->pac_update_ring, pages, PAC_DRAIN_BATCH);
             log_ring_buffer_op(ctx, "adaptive_coroutine", "pop_batch", "pac_update_ring", count,
-                               ring_buffer_uint64_size(ctx->pac_update_ring),
+                               ring_buffer_pac_update_size(ctx->pac_update_ring),
                                (size_t)PAC_UPDATE_RING_SIZE);
             for (int i = 0; i < count; i++) {
-                apply_encoded_pac_sample(ctx, pages[i]);
+                apply_encoded_pac_sample(ctx, pages[i].encoded, pages[i].pid);
             }
             if (coro_should_yield(ctx, CORO_TYPE_PAC)) {
                 mco_yield(co);
@@ -896,13 +965,6 @@ static int create_coroutine(pact_context_t *ctx, int type, const char *name,
 
 static int init_coroutines(pact_context_t *ctx)
 {
-    if (ctx->pebs_available && ctx->pebs_aggregator) {
-        if (create_coroutine(ctx, CORO_TYPE_PEBS, "PEBS aggregator", pebs_aggregator_coroutine) <
-            0) {
-            return -1;
-        }
-        log_info("init_coroutines", "PEBS aggregator coroutine created");
-    }
     /* Migration runs in the dedicated pthread; no coroutine for it. */
     if (create_coroutine(ctx, CORO_TYPE_PAC, "adaptive", adaptive_coroutine) < 0) {
         return -1;
@@ -919,7 +981,7 @@ static int init_coroutines(pact_context_t *ctx)
         }
         log_info("init_coroutines", "Rerank coroutine created (userspace demotion)");
     }
-    log_info("init_coroutines", "Initialized coroutines for single-threaded event loop");
+    log_info("init_coroutines", "Initialized PAC, cooling, stats and optional rerank on the control thread");
     return 0;
 }
 
@@ -939,6 +1001,11 @@ static bool event_loop_init_subsystems(pact_context_t *pact)
     }
     if (init_migration_thread(pact) < 0) {
         log_error("pact_event_loop", "Failed to initialize migration thread");
+        return false;
+    }
+    if (init_sampling_thread(pact) < 0) {
+        pact->running = false;
+        cleanup_migration_thread(pact);
         return false;
     }
     return true;
@@ -1022,7 +1089,8 @@ static void check_targets_alive(pact_context_t *pact, uint64_t now)
 /* Main event loop with coroutines */
 static void run_pact_event_loop(pact_context_t *pact)
 {
-    log_info("run_pact_event_loop", "Starting PACT event loop (single-threaded with coroutines)");
+    log_info("run_pact_event_loop",
+             "Starting PACT control event loop (separate sampling and migration threads)");
     if (!event_loop_init_subsystems(pact)) {
         return;
     }
@@ -1038,13 +1106,7 @@ static void run_pact_event_loop(pact_context_t *pact)
         /* Note: each tick advances its own next_tsc BEFORE resuming the
          * coroutine — the coroutine may yield from several positions, so we
          * must not lose the scheduling slot if it runs long.
-         *
-         * Migration has its own helper (burst mode + thread/coroutine branch),
-         * so iterate the other timed coroutines explicitly. */
-        if (tick_coroutine(pact, now, CORO_TYPE_PEBS)) {
-            total_yields++;
-            did_work = true;
-        }
+         * Sampling and migration run on their own threads. */
         if (tick_coroutine(pact, now, CORO_TYPE_PAC)) {
             total_yields++;
             did_work = true;
@@ -1088,6 +1150,7 @@ static void run_pact_event_loop(pact_context_t *pact)
              "Exiting event loop after %lu iterations and %lu coroutine yields", loop_count,
              total_yields);
 
+    cleanup_sampling_thread(pact);
     cleanup_migration_thread(pact);
     for (int i = 0; i < CORO_TYPE_MAX; i++) {
         if (pact->coroutines[i]) {
@@ -1112,24 +1175,28 @@ static void init_cpu_states(pact_context_t *pact)
     log_info("pact_init", "Initialized %d CPUs for workload", pact->nr_all_cpus);
 }
 
-/* Apply CLI-configured initial bin width/count to the workload's binning. */
+/* Apply CLI-configured initial bin width/count to every workload's binning. */
 static void init_workload_binning(pact_context_t *pact)
 {
-    pact->workload->binning->bin_width = pact->bin_width;
-    pact->workload->binning->bin_count = pact->bin_count;
-    /* PC PEBS capacity-aware θ (NOT rerank --fast-tier-frac). Env:
-     * PACT_PC_TARGET_FRAC (preferred) or legacy PACT_FAST_TIER_FRAC. 0 = off.
-     * θ = (1-frac) percentile of the score distribution each stats interval. */
     const char *frac = getenv("PACT_PC_TARGET_FRAC");
     if (!frac || !*frac) {
         frac = getenv("PACT_FAST_TIER_FRAC"); /* legacy alias */
     }
-    pact->workload->binning->pc_target_frac = (frac && *frac) ? strtod(frac, 0) : 0.0;
-    pact->workload->binning->pc_threshold = 1e18; /* promote-nothing until first percentile calc */
-    if (pact->workload->binning->pc_target_frac > 0.0) {
+    double pc_frac = (frac && *frac) ? strtod(frac, 0) : 0.0;
+    for (int i = 0; i < pact->n_workloads; i++) {
+        pact_workload_t *wl = &pact->workloads[i];
+        if (!wl->binning) {
+            continue;
+        }
+        wl->binning->bin_width = pact->bin_width;
+        wl->binning->bin_count = pact->bin_count;
+        wl->binning->pc_target_frac = pc_frac;
+        wl->binning->pc_threshold = 1e18;
+    }
+    if (pc_frac > 0.0) {
         log_info("init_workload_binning",
                  "pc PEBS capacity-aware mode: pc_target_frac=%.3f (not rerank --fast-tier-frac)",
-                 pact->workload->binning->pc_target_frac);
+                 pc_frac);
     }
 }
 
@@ -1139,6 +1206,11 @@ static void init_coro_tick_clocks(pact_context_t *pact, uint64_t now)
 {
     pact->start_tsc = now;
     for (coro_type_t t = 0; t < CORO_TYPE_MAX; t++) {
+        if (t == CORO_TYPE_PEBS) {
+            pact->timing[t].next_tsc = 0;
+            pact->timing[t].prev_tsc = 0;
+            continue;
+        }
         pact->timing[t].next_tsc = now + ms_to_tsc(pact, pact_coro_interval_ms(pact, t));
         pact->timing[t].prev_tsc = now;
     }
@@ -1149,7 +1221,7 @@ static void init_coro_tick_clocks(pact_context_t *pact, uint64_t now)
  * sample flows through this ring, so there is nothing to degrade to. */
 static void init_pac_update_ring(pact_context_t *pact)
 {
-    pact->pac_update_ring = ring_buffer_uint64_create(PAC_UPDATE_RING_SIZE);
+    pact->pac_update_ring = ring_buffer_pac_update_create(PAC_UPDATE_RING_SIZE);
     if (!pact->pac_update_ring) {
         log_error("pact_init", "Failed to initialize PAC update ring buffer");
         exit(EXIT_FAILURE);
@@ -1225,14 +1297,13 @@ static void destroy_coroutines(pact_context_t *pact)
     }
 }
 
-/* Close per-CHA event-group fds for the workload. The CHA struct itself
- * lives inline in pact_workload_t. */
+/* Close per-CHA event-group fds. CHA is opened on the first workload only. */
 static void destroy_cha_state(pact_context_t *pact)
 {
-    if (!pact->workload) {
+    if (pact->n_workloads < 1) {
         return;
     }
-    pact_workload_t *wl = pact->workload;
+    pact_workload_t *wl = &pact->workloads[0];
     for (int cha = 0; cha < wl->nr_cha; cha++) {
         cha_pmu_info_t *cha_pmu = &wl->cha_pmus[cha];
         for (int i = 0; i < cha_pmu->group_fast.counters_used; i++) {
@@ -1262,12 +1333,11 @@ static void destroy_per_cpu_pebs(pact_context_t *pact)
 }
 
 /* Workload counting fds + workload misc arrays (cpus/MLP). */
-static void destroy_per_workload_perf(pact_context_t *pact)
+static void destroy_one_workload_perf(pact_workload_t *wl)
 {
-    if (!pact->workload) {
+    if (!wl) {
         return;
     }
-    pact_workload_t *wl = pact->workload;
     safe_close(wl->counting_leader.fd, "pact_destroy");
     wl->counting_leader.fd = -1;
     for (int j = 0; j < CORE_EVENT_COUNT; j++) {
@@ -1278,13 +1348,19 @@ static void destroy_per_workload_perf(pact_context_t *pact)
     wl->target_cpus = NULL;
 }
 
-/* Workload hash table, reservoir, binning. */
-static void destroy_per_workload_data(pact_context_t *pact)
+static void destroy_per_workload_perf(pact_context_t *pact)
 {
-    if (!pact->workload) {
+    for (int i = 0; i < pact->n_workloads; i++) {
+        destroy_one_workload_perf(&pact->workloads[i]);
+    }
+}
+
+/* Workload hash table, reservoir, binning. */
+static void destroy_one_workload_data(pact_context_t *pact, pact_workload_t *wl)
+{
+    if (!wl) {
         return;
     }
-    pact_workload_t *wl = pact->workload;
     if (wl->pac_table) {
         khint_t wk;
         kh_foreach(wl->pac_table, wk)
@@ -1292,12 +1368,22 @@ static void destroy_per_workload_data(pact_context_t *pact)
             free_pac_metadata(pact, kh_val(wl->pac_table, wk));
         }
         pac_table_destroy(wl->pac_table);
+        wl->pac_table = NULL;
     }
     if (wl->reservoir) {
         free(wl->reservoir->samples);
         free(wl->reservoir);
+        wl->reservoir = NULL;
     }
     free(wl->binning);
+    wl->binning = NULL;
+}
+
+static void destroy_per_workload_data(pact_context_t *pact)
+{
+    for (int i = 0; i < pact->n_workloads; i++) {
+        destroy_one_workload_data(pact, &pact->workloads[i]);
+    }
 }
 
 void pact_destroy(pact_context_t *pact)
@@ -1306,19 +1392,23 @@ void pact_destroy(pact_context_t *pact)
         return;
     }
 
+    cleanup_sampling_thread(pact);
     destroy_traces(pact);
     if (pact->pac_update_ring) {
-        ring_buffer_uint64_destroy(pact->pac_update_ring);
+        ring_buffer_pac_update_destroy(pact->pac_update_ring);
     }
     destroy_coroutines(pact);
     if (pact->pebs_aggregator) {
         pebs_aggregator_destroy(pact->pebs_aggregator);
         pact->pebs_aggregator = NULL;
     }
-    if (pact->pc_class) {
-        pc_class_log_stats_final(pact->pc_class);
-        pc_class_destroy(pact->pc_class);
-        pact->pc_class = NULL;
+    pact->pc_class = NULL; /* alias of workloads[0].pc_class; destroy per-wl */
+    for (int i = 0; i < pact->n_workloads; i++) {
+        if (pact->workloads[i].pc_class) {
+            pc_class_log_stats_final(pact->workloads[i].pc_class);
+            pc_class_destroy(pact->workloads[i].pc_class);
+            pact->workloads[i].pc_class = NULL;
+        }
     }
     destroy_cha_state(pact);
     destroy_per_cpu_pebs(pact);
@@ -1326,8 +1416,8 @@ void pact_destroy(pact_context_t *pact)
     destroy_per_workload_data(pact);
     rerank_destroy(pact);
     score_sample_destroy(pact);
-    free(pact->workload);
     pact->workload = NULL;
+    pact->n_workloads = 0;
     free(pact->all_cpus);
 
     if (pact->pac_metadata_pool) {
@@ -1337,12 +1427,16 @@ void pact_destroy(pact_context_t *pact)
     free(pact);
 }
 
-/* Initialize the workload from configuration. */
-static int init_workload(pact_workload_t *wl, const pact_config_t *config, int max_cpus,
+/* Initialize one workload. */
+static int init_workload(pact_workload_t *wl, pid_t pid, const char *name, int max_cpus,
                          bool *cpu_used, uint64_t *all_cpus_mask)
 {
-    wl->target_pid = config->target_pid;
-    strncpy(wl->name, config->workload_name, sizeof(wl->name) - 1);
+    wl->target_pid = pid;
+    if (name && name[0]) {
+        strncpy(wl->name, name, sizeof(wl->name) - 1);
+    } else {
+        snprintf(wl->name, sizeof(wl->name), "wl%d", (int)pid);
+    }
     wl->name[sizeof(wl->name) - 1] = '\0';
 
     /* CPU mask: workload is pinned externally via taskset. Detect the
@@ -1435,12 +1529,12 @@ static int init_workload(pact_workload_t *wl, const pact_config_t *config, int m
 
 static void cleanup_workload(pact_context_t *pact)
 {
-    if (!pact->workload) {
-        return;
+    for (int i = 0; i < pact->n_workloads; i++) {
+        free(pact->workloads[i].target_cpus);
+        pact->workloads[i].target_cpus = NULL;
     }
-    free(pact->workload->target_cpus);
-    free(pact->workload);
     pact->workload = NULL;
+    pact->n_workloads = 0;
 }
 
 static int build_workload_cpu_set(pact_context_t *pact, int max_cpus, const bool *cpu_used)
@@ -1473,31 +1567,47 @@ static int build_workload_cpu_set(pact_context_t *pact, int max_cpus, const bool
 
 static int initialize_workloads(pact_context_t *pact, const pact_config_t *config)
 {
-    if (config->target_pid <= 0) {
+    int n = config->n_workloads;
+    if (n < 1 && config->target_pid > 0) {
+        n = 1;
+    }
+    if (n < 1) {
         fprintf(stderr, "Error: --workload PID is required\n");
         return -1;
     }
-
-    pact->workload = calloc(1, sizeof(pact_workload_t));
-    if (!pact->workload) {
-        fprintf(stderr, "Error: Failed to allocate workload\n");
+    if (n > PACT_MAX_WORKLOADS) {
+        fprintf(stderr, "Error: too many workloads (%d > %d)\n", n, PACT_MAX_WORKLOADS);
         return -1;
     }
+
+    memset(pact->workloads, 0, sizeof(pact->workloads));
+    pact->n_workloads = n;
+    pact->workload = &pact->workloads[0];
 
     int max_cpus = sysconf(_SC_NPROCESSORS_CONF);
     bool *cpu_used = calloc(max_cpus, sizeof(bool));
     if (!cpu_used) {
         fprintf(stderr, "Error: Failed to allocate CPU tracking array\n");
-        free(pact->workload);
         pact->workload = NULL;
+        pact->n_workloads = 0;
         return -1;
     }
 
     pact->all_cpus_mask = 0;
-    if (init_workload(pact->workload, config, max_cpus, cpu_used, &pact->all_cpus_mask) != 0) {
-        cleanup_workload(pact);
-        free(cpu_used);
-        return -1;
+    for (int i = 0; i < n; i++) {
+        pid_t pid = (config->n_workloads > 0) ? config->target_pids[i] : config->target_pid;
+        char name[64];
+        if (n == 1 && config->workload_name[0]) {
+            snprintf(name, sizeof(name), "%s", config->workload_name);
+        } else {
+            snprintf(name, sizeof(name), "wl%d", i);
+        }
+        if (init_workload(&pact->workloads[i], pid, name, max_cpus, cpu_used,
+                          &pact->all_cpus_mask) != 0) {
+            cleanup_workload(pact);
+            free(cpu_used);
+            return -1;
+        }
     }
 
     if (build_workload_cpu_set(pact, max_cpus, cpu_used) != 0) {
@@ -1588,12 +1698,22 @@ static int initialize_pact_context(pact_context_t *pact, const pact_config_t *co
 
     /* Scoring mode + optional PC-class. PC-class needs BOTH paths. */
     bool want_weights = config->class_weights_path[0] != '\0';
-    bool want_map = config->pc_class_map_path[0] != '\0';
+    int n_maps = config->n_pc_class_maps;
+    if (n_maps == 0 && config->pc_class_map_path[0] != '\0') {
+        n_maps = 1;
+    }
+    bool want_map = n_maps > 0;
     if (want_weights ^ want_map) {
         log_error("pact_init",
                   "PC-class needs both --class-weights and --pc-class-map "
-                  "(got weights=%s map=%s)",
-                  want_weights ? "yes" : "no", want_map ? "yes" : "no");
+                  "(got weights=%s maps=%d)",
+                  want_weights ? "yes" : "no", n_maps);
+        return -1;
+    }
+    if (want_map && n_maps != pact->n_workloads) {
+        log_error("pact_init",
+                  "--pc-class-map count (%d) must match --workload count (%d)",
+                  n_maps, pact->n_workloads);
         return -1;
     }
 
@@ -1612,22 +1732,28 @@ static int initialize_pact_context(pact_context_t *pact, const pact_config_t *co
                       mode == SCORE_MODE_PC ? "pc" : "pac+pc");
             return -1;
         }
-        pact->pc_class = pc_class_create();
-        if (!pact->pc_class) {
-            log_error("pact_init", "pc_class_create failed");
-            return -1;
+        for (int i = 0; i < pact->n_workloads; i++) {
+            const char *map_path = (config->n_pc_class_maps > 0)
+                                       ? config->pc_class_map_paths[i]
+                                       : config->pc_class_map_path;
+            pact_workload_t *wl = &pact->workloads[i];
+            wl->pc_class = pc_class_create();
+            if (!wl->pc_class) {
+                log_error("pact_init", "pc_class_create failed");
+                return -1;
+            }
+            if (pc_class_load_weights(wl->pc_class, config->class_weights_path) != 0 ||
+                pc_class_load_map(wl->pc_class, map_path) != 0 ||
+                pc_class_enable_for_pid(wl->pc_class, wl->target_pid) != 0) {
+                return -1;
+            }
+            printf("  PC map wl[%d] pid=%d: %s\n", i, (int)wl->target_pid, map_path);
         }
-        if (pc_class_load_weights(pact->pc_class, config->class_weights_path) != 0 ||
-            pc_class_load_map(pact->pc_class, config->pc_class_map_path) != 0 ||
-            pc_class_enable_for_pid(pact->pc_class, config->target_pid) != 0) {
-            pc_class_destroy(pact->pc_class);
-            pact->pc_class = NULL;
-            return -1;
-        }
-        printf("Scoring mode: %s (weights=%s map=%s)\n",
+        pact->pc_class = pact->workloads[0].pc_class;
+        printf("Scoring mode: %s (weights=%s maps=%d)\n",
                mode == SCORE_MODE_PC ? "pc (pure PC-class: score=w_c)"
                                      : "pac+pc (PAC x w_c)",
-               config->class_weights_path, config->pc_class_map_path);
+               config->class_weights_path, n_maps);
     } else {
         if (mode == SCORE_MODE_FREQ) {
             printf("Scoring mode: freq (sampled remote-miss frequency)\n");
@@ -1669,15 +1795,19 @@ int main(int argc, char *argv[])
     }
     pact_init(g_pact_ctx);
 
-    printf("PACT initialized for workload PID %d across %d CPUs\n", g_pact->workload->target_pid,
+    printf("PACT initialized for %d workload(s) across %d CPUs:", g_pact->n_workloads,
            g_pact->nr_all_cpus);
+    for (int i = 0; i < g_pact->n_workloads; i++) {
+        printf(" %d", (int)g_pact->workloads[i].target_pid);
+    }
+    printf("\n");
 
     pact_signal_install_handlers(&g_pact->running);
     setup_pact_perf_events(g_pact);
     g_pact->running = true;
 
-    printf("=== PACT Runtime Mode: Single-threaded Coroutines ===\n");
-    printf("Architecture: Lock-free, event-driven, cooperative multitasking\n\n");
+    printf("=== PACT Runtime Mode: Sampling, Control, Migration Threads ===\n");
+    printf("Architecture: Sampling thread, control coroutines, migration thread\n\n");
 
     run_pact_event_loop(g_pact);
 

@@ -115,19 +115,16 @@ static int pc_cmp_double(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
-static void pc_threshold_feedback(pact_context_t *ctx)
+static void pc_threshold_feedback_one(pact_workload_t *wl)
 {
-    binning_state_t *bin = ctx->workload->binning;
-    if (ctx->score_mode != SCORE_MODE_PC || !bin || bin->pc_target_frac <= 0.0) {
+    binning_state_t *bin = wl->binning;
+    if (!bin || bin->pc_target_frac <= 0.0) {
         return;
     }
-    reservoir_t *r = ctx->workload->reservoir;
+    reservoir_t *r = wl->reservoir;
     if (!r || r->count < 8) {
         return;
     }
-    /* θ = (1 - target_frac) percentile of the score distribution = the top-frac-by-score
-     * cutoff. Stable: recomputed directly from the distribution each interval (no feedback
-     * oscillation). Chase scores highest, so top-frac ≈ chase → chase-first fill. */
     double frac = bin->pc_target_frac > 0.99 ? 0.99 : bin->pc_target_frac;
     double *work = malloc(r->count * sizeof(double));
     if (!work) {
@@ -138,29 +135,48 @@ static void pc_threshold_feedback(pact_context_t *ctx)
     size_t idx = (size_t)((1.0 - frac) * (double)(r->count - 1));
     bin->pc_threshold = work[idx];
     free(work);
-    log_info("pc_threshold_feedback", "target_frac=%.3f theta=%.3f (p%.0f of %zu samples)", frac,
-             bin->pc_threshold, (1.0 - frac) * 100.0, r->count);
+    log_info("pc_threshold_feedback", "pid=%d target_frac=%.3f theta=%.3f (p%.0f of %zu samples)",
+             (int)wl->target_pid, frac, bin->pc_threshold, (1.0 - frac) * 100.0, r->count);
+}
+
+static void pc_threshold_feedback(pact_context_t *ctx)
+{
+    if (ctx->score_mode != SCORE_MODE_PC) {
+        return;
+    }
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        pc_threshold_feedback_one(&ctx->workloads[i]);
+    }
 }
 
 void stats_coroutine(mco_coro *co)
 {
     pact_context_t *ctx = (pact_context_t *)mco_get_user_data(co);
-    pact_stats_t last_stats = ctx->workload->stats;
+    pact_stats_t *st = &ctx->workload->stats;
+    uint64_t last_events = st->pebs_events_processed;
+    uint64_t last_promotions = st->promotion_successes;
+    uint64_t last_pact_demotions = st->pact_demotions;
+    uint64_t last_demotions = st->demotion_successes;
     uint64_t last_tsc = ctx->start_tsc;
 
     while (ctx->running) {
         uint64_t now = rdtsc();
         double elapsed_sec = (double)(now - last_tsc) / ctx->tsc_freq_hz;
-        pact_stats_t *st = &ctx->workload->stats;
+        /* Load shared counters individually; a whole-struct copy races with
+         * sampling and migration even when its members are atomic. */
+        uint64_t events = st->pebs_events_processed;
+        uint64_t promotions = st->promotion_successes;
+        uint64_t pact_demotions = st->pact_demotions;
+        uint64_t demotions = st->demotion_successes;
 
-        uint64_t events_delta = st->pebs_events_processed - last_stats.pebs_events_processed;
-        uint64_t promotions_delta = st->promotion_successes - last_stats.promotion_successes;
+        uint64_t events_delta = events - last_events;
+        uint64_t promotions_delta = promotions - last_promotions;
         uint64_t demotions_delta;
         if (ctx->demotion_policy == DEMOTION_USERSPACE) {
             demotions_delta =
-                (uint64_t)st->pact_demotions - (uint64_t)last_stats.pact_demotions;
+                pact_demotions - last_pact_demotions;
         } else {
-            demotions_delta = st->demotion_successes - last_stats.demotion_successes;
+            demotions_delta = demotions - last_demotions;
         }
 
         log_info("stats_coroutine",
@@ -184,7 +200,10 @@ void stats_coroutine(mco_coro *co)
         pc_threshold_feedback(ctx); /* pc PEBS capacity θ from PACT_PC_TARGET_FRAC */
         score_sample_dump(ctx, (double)(now - ctx->start_tsc) / ctx->tsc_freq_hz);
 
-        last_stats = *st;
+        last_events = events;
+        last_promotions = promotions;
+        last_pact_demotions = pact_demotions;
+        last_demotions = demotions;
         last_tsc = now;
         mco_yield(co);
     }

@@ -46,6 +46,43 @@ bc_kron_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/kron.sg"
 bc_kron_8t_omp_threads=8
 bc_kron_8t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/kron.sg -i4 -n5"
 
+# --- bfs_kron_8t : GAP BFS on Kronecker graph, 8 threads, n=5 (A/B with bc_kron)
+# Default binary = stock gcc bfs under GAPBS_DIR. For PC maps built from
+# bfs_clang PEBS, use bfs_clang_kron_8t / bfs_clang_urand_8t instead.
+bfs_kron_8t_pname="bfs"
+bfs_kron_8t_rss=20000
+bfs_kron_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/kron.sg"
+bfs_kron_8t_omp_threads=8
+bfs_kron_8t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bfs -f ${GAPBS_GRAPH_DIR}/kron.sg -n5"
+
+# --- bfs_clang_kron_8t : same graph, clang binary matching seqpc-llvm PEBS map
+BFS_CLANG_BIN="${BFS_CLANG_BIN:-/mnt/sda4/gapbs/bfs_clang}"
+bfs_clang_kron_8t_pname="bfs"
+bfs_clang_kron_8t_rss=20000
+bfs_clang_kron_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/kron.sg"
+bfs_clang_kron_8t_omp_threads=8
+bfs_clang_kron_8t_workload_cmd="\$numactl_args ${BFS_CLANG_BIN} -f ${GAPBS_GRAPH_DIR}/kron.sg -n5"
+
+# --- bfs_clang_urand_8t : urand graph (longer trials; better tiering window)
+bfs_clang_urand_8t_pname="bfs"
+bfs_clang_urand_8t_rss=20000
+bfs_clang_urand_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/urand.sg"
+bfs_clang_urand_8t_omp_threads=8
+bfs_clang_urand_8t_workload_cmd="\$numactl_args ${BFS_CLANG_BIN} -f ${GAPBS_GRAPH_DIR}/urand.sg -n5"
+
+# --- bfs_clang_*_n64 : melody-aligned trial count (spa/gapbs/bfs-urand uses -n64)
+bfs_clang_kron_8t_n64_pname="bfs"
+bfs_clang_kron_8t_n64_rss=20000
+bfs_clang_kron_8t_n64_vmtouch_file="${GAPBS_GRAPH_DIR}/kron.sg"
+bfs_clang_kron_8t_n64_omp_threads=8
+bfs_clang_kron_8t_n64_workload_cmd="\$numactl_args ${BFS_CLANG_BIN} -f ${GAPBS_GRAPH_DIR}/kron.sg -n64"
+
+bfs_clang_urand_8t_n64_pname="bfs"
+bfs_clang_urand_8t_n64_rss=20000
+bfs_clang_urand_8t_n64_vmtouch_file="${GAPBS_GRAPH_DIR}/urand.sg"
+bfs_clang_urand_8t_n64_omp_threads=8
+bfs_clang_urand_8t_n64_workload_cmd="\$numactl_args ${BFS_CLANG_BIN} -f ${GAPBS_GRAPH_DIR}/urand.sg -n64"
+
 # --- bc_kron_4t : same graph/RSS, 4 threads on CPUs 2-5 (half the cores).
 bc_kron_4t_pname="bc"
 bc_kron_4t_rss=20000

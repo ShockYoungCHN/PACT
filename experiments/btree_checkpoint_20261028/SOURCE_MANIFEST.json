@@ -1,0 +1,265 @@
+{
+  "pact_base": "d1c7ceacfe0713445ffa81f26a063adab265780d",
+  "pc_driven_commit": "bf27c76c3289a28532eaaf99463929a3187ee3e3",
+  "tracked_working_changes": [
+    {
+      "path": "run/run-pact.sh",
+      "sha256": "94aa2b995bb9356f11212c98605e42b389e75de71099b4129e3b6b95c971d82d"
+    },
+    {
+      "path": "run/workloads.sh",
+      "sha256": "1adad749336f410fe8848fa79cae03baf7aa165363e51e27919788b170d1f4d2"
+    },
+    {
+      "path": "setup/env/modify-uncore-freq.sh",
+      "sha256": "423e4acbbc9b73ee87da742ca24211cead018e870cedc76d3de063fe94c67d46"
+    },
+    {
+      "path": "setup/env/prepare_environment.sh",
+      "sha256": "5b746a1157df58f851448cc2098a664024f3ad562021c40e6746665bf2a8278b"
+    },
+    {
+      "path": "src/binning.c",
+      "sha256": "fe1a7a88887a2928ddf1860ca5805060e4f1e18171330d4ed2736f9dbd581465"
+    },
+    {
+      "path": "src/cli.c",
+      "sha256": "92e88336a74d4d058a73182ebd39a80a58a5def2ce32fed215b13ab808bbf1ad"
+    },
+    {
+      "path": "src/config.c",
+      "sha256": "bf8ee0966a693419e2926b338c2fc1bd0f0151b47e725b7f26a87539ca6ad9aa"
+    },
+    {
+      "path": "src/config.h",
+      "sha256": "496a7e0a1db6bea22810063a7b4ea05c5821ffc60d1a235df9fb79fc9a706a72"
+    },
+    {
+      "path": "src/cooling.c",
+      "sha256": "3f6eb7413453ba4e99c4bc4e4bc7b6dd8ef1d120d3d8ccf0b6f7a30ae419abc1"
+    },
+    {
+      "path": "src/pact.c",
+      "sha256": "ae979295657746f55709376810594be72557d321bf0d0ae29bf2c9236154b7b6"
+    },
+    {
+      "path": "src/pact.h",
+      "sha256": "c82d9e25000c5814ce8a144ba345fed6891a845e25fdabc461dfa7ebd272c7c6"
+    },
+    {
+      "path": "src/pc_class.c",
+      "sha256": "af120d6aa91d606a9999981f34af3602ff653c2bbf655309e3695aad7e24e833"
+    },
+    {
+      "path": "src/pc_class.h",
+      "sha256": "dbe46be22551c4b0ed292724a8517e1b8681c7f31e65f088cbff96ae1325fc63"
+    },
+    {
+      "path": "src/pebs-aggregator.c",
+      "sha256": "17cac64e14e23b2ffcaf0b929f91d54c31a5d0a9784cb35328b827b4885dcb57"
+    },
+    {
+      "path": "src/pebs-aggregator.h",
+      "sha256": "9ddd64ebbb2972b635407537fc7c617fa9271bf205523576d4b9c34ef8e59c02"
+    },
+    {
+      "path": "src/perf.c",
+      "sha256": "ce6d5be580e709d938a3f9c54f841a65e0716fe3431d9722a24d56757e55c4e5"
+    },
+    {
+      "path": "src/pmu.c",
+      "sha256": "6609676898165613ee1deaca75adb2e56f21d36eb3e4a9c625d97afedfcb4f5c"
+    },
+    {
+      "path": "src/rerank.c",
+      "sha256": "5021b394149e54ebe98736536bfa86aaaf6b4c0de6b3596ac2bf96aa9ad4b354"
+    },
+    {
+      "path": "src/rerank.h",
+      "sha256": "a32e6095594e8dc3284c4e7efbd50cc05f01d09bb34c5eebdb5b90ba07aa9d6d"
+    },
+    {
+      "path": "src/stats-coro.c",
+      "sha256": "53e122ed483c879e47d63d6cca40b5cd50b2e0c5358567739d522ff4bed42261"
+    },
+    {
+      "path": "src/stats.c",
+      "sha256": "cc3241f1420da3f0eca7840b6879d9ae25db14405223eb767f621f0629bde792"
+    },
+    {
+      "path": "src/usage.c",
+      "sha256": "f1bcca72181e78e0fb7308a9b0760839a7f10b4e5fc68ce48a89d05fdfdaf82c"
+    },
+    {
+      "path": "src/utils.c",
+      "sha256": "c0823d971443a3ed8636bcc5ec3c74c69f742dc58fe552c0b3a09e032b57e0df"
+    },
+    {
+      "path": "src/validate.c",
+      "sha256": "3114607f3a8c933e5bd4f71c05096b26d857735459916614636f6e48583657ca"
+    }
+  ],
+  "measured_snapshots": {
+    "pac_main": {
+      "source_directory": "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/btree_ratio_grid/build.collection.defaultclock/main/src",
+      "source_sha256": {
+        "binning.c": "63338ebe25511d327bbdef4bc44a5c03249a4fe3f59af3e56b346d15e4127a3f",
+        "pact.h": "11c962c6e82b8f2cb3ca80390df54a009b9e92b3cc38ed38a82238abf9690d47",
+        "balance.h": "6b89585521060b1b550ce01ff6b60e187029c4033e4a8a281897986f84298584",
+        "utils.h": "4dcdf4eaa1b7b88ad1ff71ed9df8aac7289379842a2428f318bdc75aba29f748",
+        "tsc.h": "b376d6838d7982b07f9212531e2c846b4739c0ad35e78cde12f0b0f90fc0c42d",
+        "perf.h": "4fb78165f0140713f5600663e4fa7146fb8cf8248192da2375b1636558110ea9",
+        "validate.c": "baf28f683562556e4cafa1ef4c3c75bdd609a4ad8ff1c7bd78edd22436d5f72a",
+        "obj-pool.c": "b95354e22ec28586433c6d6d894e87f37108718caf24cb3e50cde77adff87319",
+        "khashl.h": "dc069d439086239385d9964f7a8be3f821ef63df484031ff4b2729148482bee4",
+        "stats.h": "97d7e907985b01e1ef95ed553c787d596b0e878261069bd1bdf40a44f0112886",
+        "pmu.h": "83d0596baa488bebf55ff5cf101f4170770ae40643bd3058e1cdad7d3b9af58a",
+        "error.h": "9646f2aaa74e4960d999612fc0c7fd08b22809f3d5abd5f9bcfe6c79ab5f535f",
+        "pmu-platform.h": "4b309dd96b44aa3701f75fd508af69233b005fcbdcf755db2c015aaaa8c98e71",
+        "config.c": "b73413a8112d4e69be8e6e85564683a7b91fb544994592ea9b04df874f64c830",
+        "logging.c": "890624d05b6761c124a39bd1c48ac042aab7576a3c934cfcb729620d964901a3",
+        "stats-coro.h": "1ba684d82160e3485f11d9868b8567a786d28c2caf11e8fd297e52642b766b5a",
+        "cli.h": "80116a17c4f844133287b0853032fdf5b4767aaa096b5a6a5f7f002100236c0c",
+        "Makefile": "d29d85c532088d469235a3c30c92a81d38d58216c6e92da89ffe23dbae6e05d3",
+        "cooling.h": "b57550e03abb076a0c67fb81e50223b872d0808d84eac5e3ce3ba59605f1951a",
+        "pebs-aggregator.h": "73c566a2883b130fe17f8c97033ae66607c7c2e59a13baca916268d80315d008",
+        "usage.h": "2b47d572767a514e30c91f63bee0a9265c711c139c4c88aa62c92f9f0e233aa9",
+        "sighandler.c": "62f378680dd0ac405027c41acf9039d533f98360c351de3fb44378742a2fc5ad",
+        "obj-pool.h": "a459183d8079cda493e4ee4c30b3bca2327c3518d0a152a4cd56a96b4d31a2bb",
+        "stats.c": "56480e6bd5543580a8ca329deb8fd2374b99e69bfb41feda261d604d409c82bb",
+        "perf.c": "66b26898c8e8bb06e6b70afce639eed2a2c615713c81eb32faf9ebbeea1760a7",
+        "validate.h": "d608805805bb13c2db095fcd451fd66383ee17b39abdc16b16a3dac6f54f17f1",
+        "binning.h": "80cb3d4d151f528e5535db44da8a2919b47cf4876f2dc8ab509c59f7a648e558",
+        "pact.c": "4291ae108f195507b25cd77b3e9b265d0597c1c987176563eea071cc6147780f",
+        "balance.c": "f57af60e2e51da705b1254d05948e422e2f0a1dbbe79804e5a671ce8b3fbc070",
+        "utils.c": "825e017e358318244f0d3eee93d928287735ed3693856f813dc61f9768c6486f",
+        "usage.c": "2390dd47dc570c0385fb6177e5813e95dca0db682b429b611854bc0da8a9147c",
+        "sighandler.h": "21777a572f0bd99f47024b490022f9cda977192d9047821b538cb7ad394b15c4",
+        "pebs-aggregator.c": "5bb3b9adaa8d318a2b57b8a3365bf266abc4b8cd235397834c2d7d6387592cc3",
+        "ring-buffer.h": "88737db330c5ed90ca7ec6a3c2c6aa42c77fb823f74aad5afb9d4d00582c73d4",
+        "minicoro.h": "a2fd8defca8185afc4c764899542c2de08c590cb29a2f3e996b2ea752758ef67",
+        "cli.c": "6587a598fe06f8af7e12c61495bb9b1d0be56d556d16e24ec8940c85a6844eb8",
+        "cooling.c": "9c9d97b410026d5f992b73a2c543ba5e22cb7e4a7846cab0a7181ce8bb91a73f",
+        "pmu.c": "d92389637138d8c50a88c57803fc14c3ecc111b02f3647f3b44153206f40bb4f",
+        "error.c": "db5976bd19c6976fcc1fb0a6bd321b22497799e7b74aff3fcd32a96783b95d94",
+        "pmu-platform.c": "a0cff44e969e41ded4f9c5bdda47b5912af07e6444e06a9f4068261b56328744",
+        "build-info.h": "113ee2ad20e83fb5f44b7789b9d1a699edd7b0eb39d54108aecca2f9c8066bf9",
+        "config.h": "a0ccc1c02a9c00be5e6fb30060e9c8176bc5a8a135262536446745d1e5c3aaa0",
+        "logging.h": "5fed1ab9f9a13d7aface77a958db761c969f2605ab771270b563fbf941e2a5ae",
+        "constants.h": "ca879c57230867058e9f75ab76665590194ad2703d8fb5efbb9952f77e39b9d1",
+        "stats-coro.c": "bf5351b2fa8821838489cb725ecdace663b36e71a9a0b832eece5541deb89f42"
+      },
+      "measured_binary_sha256": "be7be5dd35e7abd01b7a574004ef411c9a1cb6bd55a0858ba9e3c9871d4ef7fd"
+    },
+    "freq_main": {
+      "source_directory": "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028/build.freq/src",
+      "source_sha256": {
+        "balance.c": "f57af60e2e51da705b1254d05948e422e2f0a1dbbe79804e5a671ce8b3fbc070",
+        "pebs-aggregator.c": "d43919bebe3bb4dcb99b520b6122efceaa3b445faf219e2fd63614768c734efc",
+        "sighandler.h": "21777a572f0bd99f47024b490022f9cda977192d9047821b538cb7ad394b15c4",
+        "binning.h": "80cb3d4d151f528e5535db44da8a2919b47cf4876f2dc8ab509c59f7a648e558",
+        "minicoro.h": "a2fd8defca8185afc4c764899542c2de08c590cb29a2f3e996b2ea752758ef67",
+        "usage.h": "2b47d572767a514e30c91f63bee0a9265c711c139c4c88aa62c92f9f0e233aa9",
+        "ring-buffer.h": "88737db330c5ed90ca7ec6a3c2c6aa42c77fb823f74aad5afb9d4d00582c73d4",
+        "pmu.h": "83d0596baa488bebf55ff5cf101f4170770ae40643bd3058e1cdad7d3b9af58a",
+        "perf.c": "66b26898c8e8bb06e6b70afce639eed2a2c615713c81eb32faf9ebbeea1760a7",
+        "error.h": "9646f2aaa74e4960d999612fc0c7fd08b22809f3d5abd5f9bcfe6c79ab5f535f",
+        "Makefile": "c6279ad1b3d1dcd7d4ddf56d6540210e12ad1e94b60fd430f5076ac505b8c262",
+        "pact.c": "4291ae108f195507b25cd77b3e9b265d0597c1c987176563eea071cc6147780f",
+        "stats-coro.c": "bf5351b2fa8821838489cb725ecdace663b36e71a9a0b832eece5541deb89f42",
+        "cli.h": "80116a17c4f844133287b0853032fdf5b4767aaa096b5a6a5f7f002100236c0c",
+        "constants.h": "ca879c57230867058e9f75ab76665590194ad2703d8fb5efbb9952f77e39b9d1",
+        "config.c": "b73413a8112d4e69be8e6e85564683a7b91fb544994592ea9b04df874f64c830",
+        "build-info.h": "d775cdffd696a2475122755671ae6d15a940dc1ae5cbda6a0c2d992cf6fa0bdb",
+        "logging.h": "5fed1ab9f9a13d7aface77a958db761c969f2605ab771270b563fbf941e2a5ae",
+        "khashl.h": "dc069d439086239385d9964f7a8be3f821ef63df484031ff4b2729148482bee4",
+        "sample_score.h": "83894cdfceb8c2d255bcd7618abd7faf148f13fc0a74b44a96d4e74a5e6f8bf5",
+        "cooling.c": "9c9d97b410026d5f992b73a2c543ba5e22cb7e4a7846cab0a7181ce8bb91a73f",
+        "stats.h": "97d7e907985b01e1ef95ed553c787d596b0e878261069bd1bdf40a44f0112886",
+        "validate.h": "d608805805bb13c2db095fcd451fd66383ee17b39abdc16b16a3dac6f54f17f1",
+        "utils.h": "4dcdf4eaa1b7b88ad1ff71ed9df8aac7289379842a2428f318bdc75aba29f748",
+        "pmu-platform.h": "4b309dd96b44aa3701f75fd508af69233b005fcbdcf755db2c015aaaa8c98e71",
+        "tsc.h": "b376d6838d7982b07f9212531e2c846b4739c0ad35e78cde12f0b0f90fc0c42d",
+        "obj-pool.h": "a459183d8079cda493e4ee4c30b3bca2327c3518d0a152a4cd56a96b4d31a2bb",
+        "pact.h": "11c962c6e82b8f2cb3ca80390df54a009b9e92b3cc38ed38a82238abf9690d47",
+        "stats-coro.h": "1ba684d82160e3485f11d9868b8567a786d28c2caf11e8fd297e52642b766b5a",
+        "cli.c": "6587a598fe06f8af7e12c61495bb9b1d0be56d556d16e24ec8940c85a6844eb8",
+        "config.h": "a0ccc1c02a9c00be5e6fb30060e9c8176bc5a8a135262536446745d1e5c3aaa0",
+        "pmu.c": "d92389637138d8c50a88c57803fc14c3ecc111b02f3647f3b44153206f40bb4f",
+        "perf.h": "4fb78165f0140713f5600663e4fa7146fb8cf8248192da2375b1636558110ea9",
+        "error.c": "db5976bd19c6976fcc1fb0a6bd321b22497799e7b74aff3fcd32a96783b95d94",
+        "usage.c": "2390dd47dc570c0385fb6177e5813e95dca0db682b429b611854bc0da8a9147c",
+        "balance.h": "6b89585521060b1b550ce01ff6b60e187029c4033e4a8a281897986f84298584",
+        "pebs-aggregator.h": "73c566a2883b130fe17f8c97033ae66607c7c2e59a13baca916268d80315d008",
+        "sighandler.c": "62f378680dd0ac405027c41acf9039d533f98360c351de3fb44378742a2fc5ad",
+        "binning.c": "63338ebe25511d327bbdef4bc44a5c03249a4fe3f59af3e56b346d15e4127a3f",
+        "obj-pool.c": "b95354e22ec28586433c6d6d894e87f37108718caf24cb3e50cde77adff87319",
+        "utils.c": "825e017e358318244f0d3eee93d928287735ed3693856f813dc61f9768c6486f",
+        "pmu-platform.c": "a0cff44e969e41ded4f9c5bdda47b5912af07e6444e06a9f4068261b56328744",
+        "cooling.h": "b57550e03abb076a0c67fb81e50223b872d0808d84eac5e3ce3ba59605f1951a",
+        "stats.c": "56480e6bd5543580a8ca329deb8fd2374b99e69bfb41feda261d604d409c82bb",
+        "validate.c": "baf28f683562556e4cafa1ef4c3c75bdd609a4ad8ff1c7bd78edd22436d5f72a",
+        "logging.c": "890624d05b6761c124a39bd1c48ac042aab7576a3c934cfcb729620d964901a3"
+      },
+      "measured_binary_sha256": "446f6d7a0c6eb8b09c23d01f21832ddfdf98b23fb8c1ca80229de7034c693cb5"
+    },
+    "pc_4k_positive": {
+      "source_directory": "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/btree_ratio_grid/build.page4k_tuned_positive_20261027/runtime",
+      "source_sha256": {
+        "perf.c": "ce6d5be580e709d938a3f9c54f841a65e0716fe3431d9722a24d56757e55c4e5",
+        "pmu-platform.c": "aff82d1d769561bbc79f0fc179119246d3d9a87fa663079d932a355e6b3054c8",
+        "obj-pool.c": "b95354e22ec28586433c6d6d894e87f37108718caf24cb3e50cde77adff87319",
+        "balance.c": "2c596ac19df9a1eada4a7c25c070307ee92dd1e7044b445f79a63321b4ec1e4b",
+        "pact.c": "795c43c8c4182992270b16ee05e5e66377606569a51ccc3f71b3384412db5eea",
+        "utils.c": "c0823d971443a3ed8636bcc5ec3c74c69f742dc58fe552c0b3a09e032b57e0df",
+        "pebs-aggregator.c": "911127e18529e40ee018607c6bc419de1a1b6e47a5a44b2f8902f4d0b4eca9c4",
+        "build-info.h": "0873f22af83fc0492398ba95d04657a49ce1a27dfb12fa099297911befbe6aa7",
+        "binning.h": "80cb3d4d151f528e5535db44da8a2919b47cf4876f2dc8ab509c59f7a648e558",
+        "stats-coro.c": "53e122ed483c879e47d63d6cca40b5cd50b2e0c5358567739d522ff4bed42261",
+        "sighandler.h": "21777a572f0bd99f47024b490022f9cda977192d9047821b538cb7ad394b15c4",
+        "stats.c": "cc3241f1420da3f0eca7840b6879d9ae25db14405223eb767f621f0629bde792",
+        "validate.c": "3114607f3a8c933e5bd4f71c05096b26d857735459916614636f6e48583657ca",
+        "cooling.c": "3f6eb7413453ba4e99c4bc4e4bc7b6dd8ef1d120d3d8ccf0b6f7a30ae419abc1",
+        "constants.h": "9378d89a6952efb9fa39ba3d3f92fddd452c913373e7a194911873638fd1e270",
+        "rerank.h": "9db1c3ecdb8030f213eaad7cf7e3f65149304f8505376dc06c83c0717b86c0db",
+        "pc_class.h": "c3019adaeb27eceb075298738ffa14e653b189de45abd80d867a31554d6b0c3a",
+        "config.h": "272bdddd6ce74c7b686db642b05bfe50f91426f883761173e4796012fc0fddc9",
+        "logging.h": "5fed1ab9f9a13d7aface77a958db761c969f2605ab771270b563fbf941e2a5ae",
+        "error.c": "949c7b63fa5074e1da678a635b12507d9a5d3aede857dd9cd82e2c5be59ae2de",
+        "pmu.c": "4e554bddb162a934c49d32d11f9b311d45fc6146aa829d308ff7c5e926cdc481",
+        "usage.c": "09cb2b31f1b36604e18d8806a1e51834113f7a44a0b3ea4571e27323b199a017",
+        "cli.c": "5eb447171c71810de097dac21290ea9e90b3d0e7ccc4bd48478b1fc706b6a2d1",
+        "score_sample.h": "e364ffc31679f472abaac7bb9f5685961fb5c3a98ae4b3f9003a31d893ab8c16",
+        "tsc.h": "b376d6838d7982b07f9212531e2c846b4739c0ad35e78cde12f0b0f90fc0c42d",
+        "validate.h": "d608805805bb13c2db095fcd451fd66383ee17b39abdc16b16a3dac6f54f17f1",
+        "sighandler.c": "62f378680dd0ac405027c41acf9039d533f98360c351de3fb44378742a2fc5ad",
+        "ring-buffer.h": "88737db330c5ed90ca7ec6a3c2c6aa42c77fb823f74aad5afb9d4d00582c73d4",
+        "khashl.h": "dc069d439086239385d9964f7a8be3f821ef63df484031ff4b2729148482bee4",
+        "stats.h": "97d7e907985b01e1ef95ed553c787d596b0e878261069bd1bdf40a44f0112886",
+        "obj-pool.h": "a459183d8079cda493e4ee4c30b3bca2327c3518d0a152a4cd56a96b4d31a2bb",
+        "balance.h": "1cf1e6163c6f66baa32e0ecd74d77616f07598db212722e4439402e9176e5448",
+        "pact.h": "221de09b60acaa4aca901006b465b42b8510b85714a5aec2bc2d2b0e9d8df62c",
+        "utils.h": "4dcdf4eaa1b7b88ad1ff71ed9df8aac7289379842a2428f318bdc75aba29f748",
+        "pebs-aggregator.h": "9ddd64ebbb2972b635407537fc7c617fa9271bf205523576d4b9c34ef8e59c02",
+        "binning.c": "fe1a7a88887a2928ddf1860ca5805060e4f1e18171330d4ed2736f9dbd581465",
+        "stats-coro.h": "1ba684d82160e3485f11d9868b8567a786d28c2caf11e8fd297e52642b766b5a",
+        "perf.h": "4fb78165f0140713f5600663e4fa7146fb8cf8248192da2375b1636558110ea9",
+        "pmu-platform.h": "4f8d583c51182da92ce45973c9d070b82788c94c3c1ada90ba008fc171d1d3c2",
+        "minicoro.h": "a2fd8defca8185afc4c764899542c2de08c590cb29a2f3e996b2ea752758ef67",
+        "cli.h": "80116a17c4f844133287b0853032fdf5b4767aaa096b5a6a5f7f002100236c0c",
+        "score_sample.c": "494811339ad4fe95f77c560c16e25d0ed9e55bd4231136706a0aa5b4cd74e6d5",
+        "pmu.h": "eed08f48a0d73d51d6a038db8fd0b1e92ed00084feb59c8ae4b4fcf8b47c192e",
+        "usage.h": "2b47d572767a514e30c91f63bee0a9265c711c139c4c88aa62c92f9f0e233aa9",
+        "config.c": "bf8ee0966a693419e2926b338c2fc1bd0f0151b47e725b7f26a87539ca6ad9aa",
+        "logging.c": "890624d05b6761c124a39bd1c48ac042aab7576a3c934cfcb729620d964901a3",
+        "error.h": "9646f2aaa74e4960d999612fc0c7fd08b22809f3d5abd5f9bcfe6c79ab5f535f",
+        "Makefile": "d29d85c532088d469235a3c30c92a81d38d58216c6e92da89ffe23dbae6e05d3",
+        "cooling.h": "b57550e03abb076a0c67fb81e50223b872d0808d84eac5e3ce3ba59605f1951a",
+        "pebs-sample.h": "9f2bc15385dae61fb8842be2ef88dd26212ffce46a077c1ddbb8c0147cf33f3a",
+        "rerank.c": "7c321c8b4d5ee5bb0e2fc77425e2c8f6032480cd73f20ec7cc90b74da7cf28af",
+        "pc_class.c": "d06ff5401940ed0e8239e823a63c1ab721f5e32edca45b4886e6926ae11358b8"
+      },
+      "measured_binary_sha256": "6d06765df6550f641a14372e347501f091b786fc61bf39be03602e60d515f8e1"
+    }
+  }
+}

@@ -1,0 +1,400 @@
+{
+  "passed": true,
+  "cases": [
+    {
+      "arm": "pc",
+      "threads": 1,
+      "active_qps": 248451.32888888888,
+      "frozen_qps": 293700.65454545454,
+      "active_50s": [
+        {
+          "start_s": 0,
+          "qps": 208042.64
+        },
+        {
+          "start_s": 50,
+          "qps": 225755.72
+        },
+        {
+          "start_s": 100,
+          "qps": 235488.48
+        },
+        {
+          "start_s": 150,
+          "qps": 244968.44
+        },
+        {
+          "start_s": 200,
+          "qps": 247224.76
+        },
+        {
+          "start_s": 250,
+          "qps": 249833.48
+        },
+        {
+          "start_s": 300,
+          "qps": 250770.52
+        },
+        {
+          "start_s": 350,
+          "qps": 250371.84
+        },
+        {
+          "start_s": 400,
+          "qps": 252699.68
+        },
+        {
+          "start_s": 450,
+          "qps": 254075.72
+        },
+        {
+          "start_s": 500,
+          "qps": 255396.36
+        },
+        {
+          "start_s": 550,
+          "qps": 254642.6
+        },
+        {
+          "start_s": 600,
+          "qps": 255050.64
+        },
+        {
+          "start_s": 650,
+          "qps": 256796.2
+        },
+        {
+          "start_s": 700,
+          "qps": 258070.64
+        },
+        {
+          "start_s": 750,
+          "qps": 257750.76
+        },
+        {
+          "start_s": 800,
+          "qps": 257807.92
+        },
+        {
+          "start_s": 850,
+          "qps": 257377.52
+        }
+      ],
+      "actual_fast_ratio_last_active60": 0.11302010476946718,
+      "initial_anon_MiB": 23594.58984375,
+      "migration": {
+        "promotion_attempts": 1599088,
+        "promotion_successes": 1282209,
+        "promotion_failures": 316879,
+        "syscall_errno": {
+          "12": 316879
+        }
+      },
+      "pools": {
+        "native_checks": {
+          "passed": true,
+          "nodes": 46062442,
+          "records": 335544320,
+          "checks": "pool ownership,parent links,unique nodes/records,key ranges,payload-key identity"
+        },
+        "regions": [
+          {
+            "group": 0,
+            "name": "header",
+            "base": 140731979137024,
+            "capacity": 5368709120,
+            "used": 2211184640,
+            "resident_bytes": 2211184640,
+            "initial_node_pages": {
+              "1": 539840
+            }
+          },
+          {
+            "group": 1,
+            "name": "internal_keys",
+            "base": 140730634862592,
+            "capacity": 1342177280,
+            "used": 527283576,
+            "resident_bytes": 527286272,
+            "initial_node_pages": {
+              "1": 128732
+            }
+          },
+          {
+            "group": 2,
+            "name": "leaf_keys",
+            "base": 140719895347200,
+            "capacity": 10737418240,
+            "used": 5368708984,
+            "resident_bytes": 5368709120,
+            "initial_node_pages": {
+              "1": 1310720
+            }
+          },
+          {
+            "group": 3,
+            "name": "pointer_arrays",
+            "base": 140706471477248,
+            "capacity": 13421772800,
+            "used": 5895992576,
+            "resident_bytes": 5895995392,
+            "initial_node_pages": {
+              "1": 1439452
+            }
+          },
+          {
+            "group": 4,
+            "name": "record",
+            "base": 140699758493696,
+            "capacity": 6710886400,
+            "used": 5368709120,
+            "resident_bytes": 5368709120,
+            "initial_node_pages": {
+              "1": 1310720
+            }
+          },
+          {
+            "group": 5,
+            "name": "payload",
+            "base": 140694387687424,
+            "capacity": 5368709120,
+            "used": 5368709120,
+            "resident_bytes": 5368709120,
+            "initial_node_pages": {
+              "1": 1310720
+            }
+          }
+        ]
+      },
+      "raw_pebs": "/users/samuraiy/pebs/btree_ratio_grid/btree_pooled_t1_pc_pact_900plus180_20261028/r1_t1_pc/pebs.txt.gz",
+      "frozen_composition": {
+        "elapsed_s": 1070.0,
+        "fast_pages": 682197,
+        "region_fast_MiB": {
+          "header": 1245.6328125,
+          "internal_keys": 472.25390625,
+          "leaf_keys": 0.0,
+          "pointer_arrays": 710.859375,
+          "record": 21.83984375,
+          "payload": 214.24609375,
+          "other": 0.0
+        },
+        "frozen": true,
+        "numa_crosscheck": true
+      },
+      "checks": {
+        "completed": true,
+        "1080seconds": true,
+        "correct_queries": true,
+        "native_tree_check": true,
+        "zero_initial_fast": true,
+        "collection_loss_checks": true,
+        "metadata_sufficient": true,
+        "frozen_identical_pages": true,
+        "kernel_migration_frozen_off": true,
+        "stopped_before915": true,
+        "fixed_counter_coverage": true,
+        "granule4096": true,
+        "calibrated_pc_map_loaded": true
+      },
+      "passed": true
+    },
+    {
+      "arm": "pact",
+      "threads": 1,
+      "active_qps": 260825.22222222222,
+      "frozen_qps": 295234.1696969697,
+      "active_50s": [
+        {
+          "start_s": 0,
+          "qps": 244656.72
+        },
+        {
+          "start_s": 50,
+          "qps": 261515.68
+        },
+        {
+          "start_s": 100,
+          "qps": 262891.44
+        },
+        {
+          "start_s": 150,
+          "qps": 259219.76
+        },
+        {
+          "start_s": 200,
+          "qps": 260030.16
+        },
+        {
+          "start_s": 250,
+          "qps": 260893.2
+        },
+        {
+          "start_s": 300,
+          "qps": 260715.48
+        },
+        {
+          "start_s": 350,
+          "qps": 260728.08
+        },
+        {
+          "start_s": 400,
+          "qps": 263817.12
+        },
+        {
+          "start_s": 450,
+          "qps": 264312.4
+        },
+        {
+          "start_s": 500,
+          "qps": 261461.52
+        },
+        {
+          "start_s": 550,
+          "qps": 261905.96
+        },
+        {
+          "start_s": 600,
+          "qps": 262331.2
+        },
+        {
+          "start_s": 650,
+          "qps": 263694.76
+        },
+        {
+          "start_s": 700,
+          "qps": 261404.88
+        },
+        {
+          "start_s": 750,
+          "qps": 262538.44
+        },
+        {
+          "start_s": 800,
+          "qps": 260968.28
+        },
+        {
+          "start_s": 850,
+          "qps": 261768.92
+        }
+      ],
+      "actual_fast_ratio_last_active60": 0.11284992307501113,
+      "initial_anon_MiB": 23594.58984375,
+      "migration": {
+        "promotion_attempts": 3369495,
+        "promotion_successes": 3369495,
+        "promotion_failures": 0,
+        "syscall_errno": {}
+      },
+      "pools": {
+        "native_checks": {
+          "passed": true,
+          "nodes": 46062442,
+          "records": 335544320,
+          "checks": "pool ownership,parent links,unique nodes/records,key ranges,payload-key identity"
+        },
+        "regions": [
+          {
+            "group": 0,
+            "name": "header",
+            "base": 140731979137024,
+            "capacity": 5368709120,
+            "used": 2211184640,
+            "resident_bytes": 2211184640,
+            "initial_node_pages": {
+              "1": 539840
+            }
+          },
+          {
+            "group": 1,
+            "name": "internal_keys",
+            "base": 140730634862592,
+            "capacity": 1342177280,
+            "used": 527283576,
+            "resident_bytes": 527286272,
+            "initial_node_pages": {
+              "1": 128732
+            }
+          },
+          {
+            "group": 2,
+            "name": "leaf_keys",
+            "base": 140719895347200,
+            "capacity": 10737418240,
+            "used": 5368708984,
+            "resident_bytes": 5368709120,
+            "initial_node_pages": {
+              "1": 1310720
+            }
+          },
+          {
+            "group": 3,
+            "name": "pointer_arrays",
+            "base": 140706471477248,
+            "capacity": 13421772800,
+            "used": 5895992576,
+            "resident_bytes": 5895995392,
+            "initial_node_pages": {
+              "1": 1439452
+            }
+          },
+          {
+            "group": 4,
+            "name": "record",
+            "base": 140699758493696,
+            "capacity": 6710886400,
+            "used": 5368709120,
+            "resident_bytes": 5368709120,
+            "initial_node_pages": {
+              "1": 1310720
+            }
+          },
+          {
+            "group": 5,
+            "name": "payload",
+            "base": 140694387687424,
+            "capacity": 5368709120,
+            "used": 5368709120,
+            "resident_bytes": 5368709120,
+            "initial_node_pages": {
+              "1": 1310720
+            }
+          }
+        ]
+      },
+      "raw_pebs": "/users/samuraiy/pebs/btree_ratio_grid/btree_pooled_t1_pc_pact_900plus180_20261028/r1_t1_pact/pebs.txt.gz",
+      "frozen_composition": {
+        "elapsed_s": 1070.0,
+        "fast_pages": 683583,
+        "region_fast_MiB": {
+          "header": 1329.515625,
+          "internal_keys": 502.3515625,
+          "leaf_keys": 57.41796875,
+          "pointer_arrays": 643.31640625,
+          "record": 61.69921875,
+          "payload": 75.9453125,
+          "other": 0.0
+        },
+        "frozen": true,
+        "numa_crosscheck": true
+      },
+      "checks": {
+        "completed": true,
+        "1080seconds": true,
+        "correct_queries": true,
+        "native_tree_check": true,
+        "zero_initial_fast": true,
+        "collection_loss_checks": true,
+        "metadata_sufficient": true,
+        "frozen_identical_pages": true,
+        "kernel_migration_frozen_off": true,
+        "stopped_before915": true,
+        "fixed_counter_coverage": true
+      },
+      "passed": true
+    }
+  ],
+  "pc_vs_pact_active_pct": -4.744132192396188,
+  "pc_vs_pact_frozen_pct": -0.5194233286374472,
+  "scope": "One fresh pooled1-worker run per policy,same workload binary/calibrated PC weights;no confidence interval;pool allocation changes footprint/actual ratio;do not present as original-layout performance. PC uses positive-score promotion filter;PACT kernel demotion during active phase;both freeze kernel migration off."
+}

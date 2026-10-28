@@ -94,7 +94,7 @@ void setup_pact_perf_events(pact_context_t *pact)
     pact_workload_t *wl = pact->workload;
 
     /* Discover and configure CHA PMUs for the workload. */
-    discover_cha_pmus(wl->cha_pmus, &wl->nr_cha, wl->cpu_mask);
+    discover_cha_pmus(wl->cha_pmus, &wl->nr_cha, pact->all_cpus_mask);
     setup_pmu_cha_perf_events(wl->cha_pmus, &wl->nr_cha);
     log_info("setup_pact_perf_events", "Workload (PID %d): Discovered %d CHAs", wl->target_pid,
              wl->nr_cha);
@@ -104,9 +104,10 @@ void setup_pact_perf_events(pact_context_t *pact)
         setup_one_cpu_perf(cpu_state, /*skip=*/false);
     }
 
-    /* Per-workload counting (single per-PID inherit fd per event) — kernel
-     * attributes LLC misses across all child threads of the workload. */
-    setup_workload_counting_events(wl);
+    /* Per-PID counting (inherit=1). CHA stays on the first workload only. */
+    for (int i = 0; i < pact->n_workloads; i++) {
+        setup_workload_counting_events(&pact->workloads[i]);
+    }
 
     int configured = count_configured_pebs_cpus(pact, pact->nr_all_cpus);
     if (configured == 0) {
@@ -118,5 +119,5 @@ void setup_pact_perf_events(pact_context_t *pact)
                  "PEBS validation will occur when workload generates LLC misses");
     }
 
-    start_pmu_perf_events(pact);
+    /* The sampling thread starts PMU events and owns all runtime ioctls. */
 }

@@ -210,10 +210,10 @@ clean_up() {
 trap clean_up EXIT INT TERM
 
 # --- PACT kernel modules ---
-# tierinit sets up NUMA tiering; kswapdrst keeps kswapd from backing off under
-# demotion pressure.  Both are out-of-tree modules under setup/kernel/.
-# If a module is already loaded we keep it; if its .ko is built we load it;
-# otherwise we abort and tell the user to build it.
+# Kernel-LRU demotion needs both out-of-tree modules under setup/kernel/:
+# tierinit registers the slow tier, kswapdrst keeps kswapd from backing off.
+# Userspace demotion does not. If a module is already loaded we keep it; if
+# its .ko is built we load it; otherwise we abort and tell the user to build it.
 ensure_kernel_module() {
     local modname=$1 moddir=$2 ko=$3
     # No `grep -q` here: under `set -o pipefail` an early -q exit can kill
@@ -245,9 +245,15 @@ elif [ "$skip_setup" != "skip_setup" ]; then
     free
 fi
 
-echo "=== Loading PACT kernel modules ==="
-ensure_kernel_module tierinit  ../setup/kernel/tierinit  ../setup/kernel/tierinit/tierinit.ko
-ensure_kernel_module kswapdrst ../setup/kernel/kswapdrst ../setup/kernel/kswapdrst/kswapdrst.ko
+# Userspace demotion moves pages with numa_move_pages and turns kernel
+# demotion off. tierinit/kswapdrst only exist for the kernel-LRU path.
+if [ "$demotion_policy" = "userspace" ]; then
+    echo "=== Skipping tierinit/kswapdrst (demotion_policy=userspace) ==="
+else
+    echo "=== Loading PACT kernel modules ==="
+    ensure_kernel_module tierinit  ../setup/kernel/tierinit  ../setup/kernel/tierinit/tierinit.ko
+    ensure_kernel_module kswapdrst ../setup/kernel/kswapdrst ../setup/kernel/kswapdrst/kswapdrst.ko
+fi
 
 echo "=== Kernel setup ==="
 echo 0 | sudo tee /sys/kernel/mm/numa/demotion_enabled >/dev/null

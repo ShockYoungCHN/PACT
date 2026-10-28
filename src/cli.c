@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include "cli.h"
 #include "error.h" /* set_log_level */
@@ -165,9 +166,7 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
                 return -1;
             }
         } else if (strcmp(argv[i], "--workload") == 0) {
-            /* --workload PID is required. CPU pinning is external
-             * (taskset). Passing --workload more than once overwrites
-             * the prior value with a warning. */
+            /* Repeatable. CPU pinning is external (taskset). */
             if (++i >= argc) {
                 fprintf(stderr, "Error: --workload requires a PID\n");
                 return -1;
@@ -177,15 +176,14 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
                 fprintf(stderr, "Error: Invalid PID: %s\n", argv[i]);
                 return -1;
             }
-            if (config->target_pid > 0) {
-                fprintf(stderr,
-                        "Warning: --workload specified more than once; "
-                        "overwriting PID %d with %d\n",
-                        config->target_pid, pid);
+            if (config->n_workloads >= PACT_MAX_WORKLOADS) {
+                fprintf(stderr, "Error: at most %d --workload PIDs\n", PACT_MAX_WORKLOADS);
+                return -1;
             }
-            config->target_pid = pid;
+            config->target_pids[config->n_workloads++] = pid;
+            config->target_pid = config->target_pids[0];
             snprintf(config->workload_name, sizeof(config->workload_name), "workload");
-            printf("Workload: PID %d\n", pid);
+            printf("Workload[%d]: PID %d\n", config->n_workloads - 1, (int)pid);
         } else if (strcmp(argv[i], "--log-level") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "Error: --log-level requires an argument\n");
@@ -245,9 +243,20 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
                 fprintf(stderr, "Error: --pc-class-map requires a PATH argument\n");
                 return -1;
             }
-            strncpy(config->pc_class_map_path, argv[i], sizeof(config->pc_class_map_path) - 1);
-            config->pc_class_map_path[sizeof(config->pc_class_map_path) - 1] = '\0';
-            printf("PC-class map: %s\n", config->pc_class_map_path);
+            if (config->n_pc_class_maps >= PACT_MAX_WORKLOADS) {
+                fprintf(stderr, "Error: at most %d --pc-class-map paths\n", PACT_MAX_WORKLOADS);
+                return -1;
+            }
+            strncpy(config->pc_class_map_paths[config->n_pc_class_maps], argv[i],
+                    sizeof(config->pc_class_map_paths[0]) - 1);
+            config->pc_class_map_paths[config->n_pc_class_maps]
+                [sizeof(config->pc_class_map_paths[0]) - 1] = '\0';
+            if (config->n_pc_class_maps == 0) {
+                strncpy(config->pc_class_map_path, argv[i], sizeof(config->pc_class_map_path) - 1);
+                config->pc_class_map_path[sizeof(config->pc_class_map_path) - 1] = '\0';
+            }
+            printf("PC-class map[%d]: %s\n", config->n_pc_class_maps, argv[i]);
+            config->n_pc_class_maps++;
         } else if (strcmp(argv[i], "--score-mode") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "Error: --score-mode requires an argument "

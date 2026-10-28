@@ -7,7 +7,6 @@
 
 #include <stdint.h>
 #include "pact.h"
-#include "minicoro.h"
 
 /* Forward declarations */
 typedef struct pebs_aggregator pebs_aggregator_t;
@@ -36,10 +35,9 @@ pebs_aggregator_t *pebs_aggregator_create(per_cpu_state_t *cpu_states, int num_c
 int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx);
 
 /*
- * PEBS aggregator coroutine
- * Replaces single-CPU PEBS coroutine in unified architecture
+ * Sampling thread: drains PEBS and publishes encoded PAC updates.
  */
-void pebs_aggregator_coroutine(mco_coro *co);
+void *pebs_sampling_thread(void *arg);
 
 /*
  * Setup PEBS aggregator for unified context

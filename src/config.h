@@ -60,9 +60,10 @@ typedef struct pact_config {
     char log_format[16];
     char log_file[256];
 
-    /* Workload identification. target_pid is required (CLI errors out if
-     * absent); sentinel value <= 0 in the config struct only at parse
-     * time. */
+    /* Workload identification. Repeat --workload to attach multiple PIDs
+     * (shared fast-tier budget C). target_pid aliases target_pids[0]. */
+    pid_t target_pids[PACT_MAX_WORKLOADS];
+    int n_workloads;
     pid_t target_pid;
     char workload_name[64];
 
@@ -73,8 +74,11 @@ typedef struct pact_config {
     /* PAC metadata pool cap */
     size_t pac_pool_max;
 
-    /* Optional PC-class scaling (both paths required to enable). */
+    /* Optional PC-class scaling (both paths required to enable).
+     * Repeat --pc-class-map once per --workload (paired by index). */
     char class_weights_path[512];
+    char pc_class_map_paths[PACT_MAX_WORKLOADS][512];
+    int n_pc_class_maps;
     char pc_class_map_path[512];
 
     /* Optional score-pool random sample CSV (debug CDF / tier-by-region). */

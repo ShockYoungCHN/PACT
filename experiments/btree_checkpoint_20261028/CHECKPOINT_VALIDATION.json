@@ -1,0 +1,14 @@
+{
+  "root_runtime_build": "make -C src -j2 passed",
+  "root_tests": [
+    "tests/test_pebs_tid.sh passed all3modes",
+    "tests/test_rerank_budget.sh passed"
+  ],
+  "shell_syntax": "run/setup helpers passed bash -n",
+  "measured_source_hashes_match": {
+    "pac_main": true,
+    "freq_main": true,
+    "pc_4k_positive": true
+  },
+  "measured_runtime_validation": "Retained exact validation JSON and completed experiment summaries;no new long benchmark"
+}

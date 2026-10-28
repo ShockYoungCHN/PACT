@@ -22,7 +22,7 @@
 #include "error.h"
 #include "pebs-aggregator.h"
 #include "logging.h"
-#include "minicoro.h"
+#include "utils.h"
 #include "pc_class.h"
 
 /* One drained PEBS sample before same-window attribution. */
@@ -49,7 +49,8 @@ typedef struct pebs_aggregator {
 
     /* Statistics */
     uint64_t events_per_cpu[64]; /* Support up to 64 CPUs */
-    uint64_t events_per_tier[2]; /* Per-tier PEBS events (workload-scoped) */
+    uint64_t events_per_tier[2]; /* Per-tier PEBS events (all target pids) */
+    uint64_t events_per_tier_wl[PACT_MAX_WORKLOADS][2];
     uint64_t read_events_from_perf;
     uint64_t pushed_events_to_update;
     uint64_t dropped_events_update_full;
@@ -65,7 +66,7 @@ typedef struct pebs_aggregator {
     pact_context_t *pact_ctx;
 
     /* Always-on diagnostic counters (cumulative across run) */
-    uint64_t aggregation_cycles_total;      /* Total aggregation coroutine invocations */
+    uint64_t aggregation_cycles_total;      /* Total sampling thread cycles */
     uint64_t aggregation_max_samples_cycle; /* High-water mark: max samples in one cycle */
     uint64_t tier_from_dsrc_fast;
     uint64_t tier_from_dsrc_slow;
@@ -184,6 +185,10 @@ static int read_one_pebs_mmap(pebs_aggregator_t *agg, void *pebs_mmap,
                     events[count].tid = (pid_t)rec.tid;
                     count++;
                     agg->events_per_tier[hw_tier]++;
+                    int wi = pact_wl_index(agg->pact_ctx, (pid_t)rec.pid);
+                    if (wi >= 0) {
+                        agg->events_per_tier_wl[wi][hw_tier]++;
+                    }
                     if (hw_tier == 0) {
                         agg->tier_from_dsrc_fast++;
                     } else {
@@ -250,17 +255,18 @@ static inline void decode_pebs_sample(const pebs_staged_sample_t *events, int i,
 }
 
 /* Per-workload attributed stalls = k_constant * llc_misses / (mlp * events).
- * The /pebs_sampling_period division is intentionally absent: LDLAT filtering,
- * ring drops, and quiet-skip losses break the ideal ev≈miss/period identity,
- * so we let PAC scale with observed sample population instead. */
-static void compute_attributed_stalls(pact_context_t *ctx, pebs_aggregator_t *agg,
-                                      double *out_fast_stalls, double *out_slow_stalls)
+ * CHA MLP is socket-wide (copied onto every wl); LLC-miss counts are per-PID. */
+static void compute_attributed_stalls_wl(pact_context_t *ctx, pebs_aggregator_t *agg, int wi,
+                                         double *out_fast_stalls, double *out_slow_stalls)
 {
     *out_fast_stalls = 0.0;
     *out_slow_stalls = 0.0;
-    pact_workload_t *wl = ctx->workload;
-    double fast_coeff = wl->workload_mlp_fast * agg->events_per_tier[0];
-    double slow_coeff = wl->workload_mlp_slow * agg->events_per_tier[1];
+    if (wi < 0 || wi >= ctx->n_workloads) {
+        return;
+    }
+    pact_workload_t *wl = &ctx->workloads[wi];
+    double fast_coeff = wl->workload_mlp_fast * (double)agg->events_per_tier_wl[wi][0];
+    double slow_coeff = wl->workload_mlp_slow * (double)agg->events_per_tier_wl[wi][1];
     if (fast_coeff > 0) {
         *out_fast_stalls = (ctx->k_constant_dram * wl->stats.llc_misses_fast) / fast_coeff;
     }
@@ -278,13 +284,8 @@ static void compute_attributed_stalls(pact_context_t *ctx, pebs_aggregator_t *ag
  * S * A_p / A_t with all terms from the same window) and pushes each
  * attributed sample to the PAC update ring.
  */
-/* --- Access-heat sample dump (opt-in via PACT_PEBS_SAMPLES_CSV) --------------
- * Mirrors REGENT's ProfileDump: PACT dumps its OWN PEBS samples (time + page)
- * so the heatmap base and the migration overlay come from the SAME run and the
- * SAME clock, with no external perf capture (no PEBS counter contention).
- * Subsampled via PACT_PEBS_SAMPLES_STRIDE (default 1). Absolute CLOCK_MONOTONIC
- * ns aligns with the migration log. Format: "time_ns pid ip addr page_id tid".
- * page_id is addr >> 21 (2MB regions); tid is the originating Linux thread. */
+/* Opt-in dump via PACT_PEBS_SAMPLES_CSV. Line: time_ns pid ip addr page_id tid.
+ * page_id is addr >> 21. PACT_PEBS_SAMPLES_STRIDE defaults to 1. */
 static FILE *g_heat_fp = NULL;
 static bool g_heat_done = false;
 static unsigned long g_heat_stride = 1;
@@ -371,11 +372,12 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
     }
     agg->last_cpu_checked = (agg->last_cpu_checked + 1) % agg->num_cpus;
 
-    /* Phase B: same-window attribution. events_per_tier was populated by
-     * the phase-A reads; the LLC-miss and MLP inputs were read from the
-     * PMU for this same window just before this call. */
-    double fast_stalls = 0.0, slow_stalls = 0.0;
-    compute_attributed_stalls(ctx, agg, &fast_stalls, &slow_stalls);
+    /* Phase B: same-window attribution, per owning pid. */
+    double fast_stalls_wl[PACT_MAX_WORKLOADS];
+    double slow_stalls_wl[PACT_MAX_WORKLOADS];
+    for (int wi = 0; wi < ctx->n_workloads; wi++) {
+        compute_attributed_stalls_wl(ctx, agg, wi, &fast_stalls_wl[wi], &slow_stalls_wl[wi]);
+    }
 
     int pac_count = 0;
     for (int i = 0; i < n; i++) {
@@ -383,31 +385,29 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
         uint64_t ip;
         uint8_t tier;
         decode_pebs_sample(agg->cycle_buf, i, &addr, &tier, &ip);
+        pid_t pid = agg->cycle_buf[i].pid;
+        int wi = pact_wl_index(ctx, pid);
         uint64_t page = addr & PAGE_MASK;
         uint32_t attributed;
         if (ctx->score_mode == SCORE_MODE_FREQ) {
-            /* Fair hotness baseline: one unit per sampled DRAM miss (local or remote). */
             attributed = 1;
         } else if (ctx->score_mode == SCORE_MODE_PC) {
-            /* Pure PC-class: per-sample score = w_c(class(ip)); ignore the PAC
-             * model. Accumulated per page this is score = Σ_c w_c · samples_c. */
-            attributed = pc_class_score(ctx, ip, PAC_VALUE_MAX);
+            attributed = pc_class_score(ctx, pid, ip, PAC_VALUE_MAX);
         } else {
-            attributed = compute_sample_stalls(tier, fast_stalls, slow_stalls);
+            double fs = (wi >= 0) ? fast_stalls_wl[wi] : 0.0;
+            double ss = (wi >= 0) ? slow_stalls_wl[wi] : 0.0;
+            attributed = compute_sample_stalls(tier, fs, ss);
             if (ctx->score_mode == SCORE_MODE_PAC_PC) {
-                attributed = scale_by_pc_class(ctx, ip, attributed, PAC_VALUE_MAX);
+                attributed = scale_by_pc_class(ctx, pid, ip, attributed, PAC_VALUE_MAX);
             }
         }
-        log_pebs_sample(ctx, "pebs_aggregate_events", 0, addr, tier, attributed);
-        heat_dump_sample(agg->cycle_buf[i].pid, agg->cycle_buf[i].tid, ip, addr,
-                         agg->cycle_buf[i].drain_time_ns);
+        log_pebs_sample(ctx, "pebs_aggregate_events", wi, addr, tier, attributed);
+        heat_dump_sample(pid, agg->cycle_buf[i].tid, ip, addr, agg->cycle_buf[i].drain_time_ns);
 
-        uint64_t pac_encoded = PEBS_ENCODE_PAC(attributed, page, tier);
-        if (ring_buffer_uint64_push(ctx->pac_update_ring, pac_encoded) == 0) {
-            /* Ring full; the adaptive coroutine drains it on this same
-             * thread, so nothing frees up mid-loop. Drop the rest. */
-            agg->dropped_events_update_full += (uint64_t)(n - i);
-            break;
+        pac_update_t upd = {.encoded = PEBS_ENCODE_PAC(attributed, page, tier), .pid = pid};
+        if (ring_buffer_pac_update_push(ctx->pac_update_ring, upd) == 0) {
+            agg->dropped_events_update_full++;
+            continue;
         }
         pac_count++;
     }
@@ -442,20 +442,24 @@ static bool poll_and_update_threads(pact_context_t *ctx, int debug_counter)
     if ((debug_counter % 250) != 0) {
         return false;
     }
-    pact_workload_t *wl = ctx->workload;
-    if (wl->target_pid <= 0) {
-        return true; /* already marked exited */
+    bool any_alive = false;
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        pact_workload_t *wl = &ctx->workloads[i];
+        if (wl->target_pid <= 0 || wl->exited) {
+            continue;
+        }
+        if (kill(wl->target_pid, 0) == 0) {
+            any_alive = true;
+            continue;
+        }
+        if (errno == ESRCH) {
+            log_info("poll_and_update_threads", "Workload (PID %d) has exited", wl->target_pid);
+            wl->exited = true;
+        } else {
+            any_alive = true; /* EPERM or other: treat as alive */
+        }
     }
-    if (kill(wl->target_pid, 0) == 0) {
-        return false;
-    }
-    if (errno == ESRCH) {
-        log_info("poll_and_update_threads", "Workload (PID %d) has exited", wl->target_pid);
-        wl->target_pid = -1;
-        return true;
-    }
-    /* EPERM or other: treat as alive to avoid premature shutdown */
-    return false;
+    return !any_alive;
 }
 
 static void log_workload_pebs_stats(pact_context_t *ctx, pebs_aggregator_t *agg)
@@ -464,10 +468,12 @@ static void log_workload_pebs_stats(pact_context_t *ctx, pebs_aggregator_t *agg)
     uint64_t theory =
         (wl->stats.llc_misses_fast + wl->stats.llc_misses_slow) / ctx->pebs_sampling_period;
     uint64_t processed = agg->events_per_tier[0] + agg->events_per_tier[1];
-    log_pebs_aggregator(ctx, "pebs_aggregator_coroutine", 0, theory, processed, agg->lost_events,
+    log_pebs_aggregator(ctx, "pebs_sampling_thread", 0, theory, processed, agg->lost_events,
                         agg->lost_samples, 0, agg->dropped_events_workload);
-    if (ctx->pc_class) {
-        pc_class_log_stats(ctx->pc_class);
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        if (ctx->workloads[i].pc_class) {
+            pc_class_log_stats(ctx->workloads[i].pc_class);
+        }
     }
     if ((agg->aggregation_cycles_total % 250) == 0) {
         log_info("pebs_aggregator", "tier_pebs local=%lu remote=%lu", agg->tier_from_dsrc_fast,
@@ -475,19 +481,23 @@ static void log_workload_pebs_stats(pact_context_t *ctx, pebs_aggregator_t *agg)
     }
 }
 
-/* Modified PEBS coroutine that uses aggregator */
-void pebs_aggregator_coroutine(mco_coro *co)
+/* Sole owner of PMU stop/read/start and PEBS mmap draining. */
+void *pebs_sampling_thread(void *arg)
 {
-    pact_context_t *ctx = (pact_context_t *)mco_get_user_data(co);
+    pact_context_t *ctx = arg;
+    if (ctx->monitor_cpu >= 0) {
+        pact_pin_to_cpu(ctx->monitor_cpu);
+    }
 
     /* Get aggregator from context */
     pebs_aggregator_t *agg = ctx->pebs_aggregator;
     if (!agg) {
-        log_error("pebs_aggregator_coroutine", "No aggregator context available");
-        return;
+        log_error("pebs_sampling_thread", "No aggregator context available");
+        ctx->running = false;
+        return NULL;
     }
 
-    log_info("pebs_aggregator_coroutine", "Starting with %d CPUs, mask=0x%lx", agg->num_cpus,
+    log_info("pebs_sampling_thread", "Starting with %d CPUs, mask=0x%lx", agg->num_cpus,
              agg->cpu_mask);
 
     int debug_counter = 0;
@@ -499,6 +509,7 @@ void pebs_aggregator_coroutine(mco_coro *co)
          * so attribution divides by this window's population. */
         agg->events_per_tier[0] = 0;
         agg->events_per_tier[1] = 0;
+        memset(agg->events_per_tier_wl, 0, sizeof(agg->events_per_tier_wl));
 
         /* turn off pmu counters */
         stop_pmu_perf_events(ctx);
@@ -507,9 +518,8 @@ void pebs_aggregator_coroutine(mco_coro *co)
         read_pmu_counting_events(ctx);
 
         if (poll_and_update_threads(ctx, debug_counter)) {
-            log_info("pebs_aggregator_coroutine", "Workload has exited, stopping PACT");
+            log_info("pebs_sampling_thread", "Workload has exited, stopping PACT");
             ctx->running = false;
-            mco_yield(co);
             break;
         }
 
@@ -519,42 +529,52 @@ void pebs_aggregator_coroutine(mco_coro *co)
         /* Drain, attribute (same-window), and publish this window's samples */
         int aggregated = pebs_aggregate_events(agg, ctx);
 
-        /* Accumulate per-workload PEBS samples into cumulative counter */
-        ctx->workload->total_pebs_samples += agg->events_per_tier[0] + agg->events_per_tier[1];
+        /* Accumulate per-workload PEBS samples into cumulative counters */
+        for (int i = 0; i < ctx->n_workloads; i++) {
+            ctx->workloads[i].total_pebs_samples +=
+                agg->events_per_tier_wl[i][0] + agg->events_per_tier_wl[i][1];
+        }
 
         /* Log workload PMU stats (after aggregation so event counts are available) */
-        log_pmu(ctx, "pebs_aggregator_coroutine", 0, ctx->workload->workload_mlp_fast,
+        log_pmu(ctx, "pebs_sampling_thread", 0, ctx->workload->workload_mlp_fast,
                 ctx->workload->workload_mlp_slow, ctx->workload->stats.llc_misses_fast,
                 ctx->workload->stats.llc_misses_slow, agg->events_per_tier[0],
                 agg->events_per_tier[1]);
 
         if (aggregated == 0) {
-            /* No events available - yield */
+            /* No events available; still sleep with PMU enabled below. */
             /* Debug: Print periodically */
             if (++debug_counter % 1000 == 0) {
-                log_debug("pebs_aggregator_coroutine",
+                log_debug("pebs_sampling_thread",
                           "PEBS aggregator: No events collected (attempt %d)", debug_counter);
             }
-            mco_yield(co);
-            continue;
         } else {
             ctx->sample_counts += aggregated;
             ctx->workload->stats.pebs_events_processed += aggregated;
-            log_debug("pebs_aggregator_coroutine", "PEBS aggregator: Pushed %d events to PAC ring",
+            log_debug("pebs_sampling_thread", "PEBS aggregator: Pushed %d events to PAC ring",
                       aggregated);
             debug_counter = 0;
         }
 
         log_workload_pebs_stats(ctx, agg);
 
-        /* Mark PAC coroutine ready if the ring has data to drain. */
-        if (ring_buffer_uint64_size(ctx->pac_update_ring) > 0) {
+        /* Leave PMU enabled while samples accumulate for the next window.
+         * Resume an interrupted sleep unless shutdown was requested. */
+        struct timespec delay = {
+            .tv_sec = ctx->sampling_interval_ms / 1000,
+            .tv_nsec = (long)(ctx->sampling_interval_ms % 1000) * 1000000L,
+        };
+        while (ctx->running && nanosleep(&delay, &delay) < 0 && errno == EINTR) {
         }
-
-        mco_yield(co);
     }
 
-    log_info("pebs_aggregator_coroutine", "PEBS Aggregator: Exiting");
+    stop_pmu_perf_events(ctx);
+    if (g_heat_fp) {
+        fclose(g_heat_fp);
+        g_heat_fp = NULL;
+    }
+    log_info("pebs_sampling_thread", "PEBS sampling thread: Exiting");
+    return NULL;
 }
 
 /* Setup PEBS aggregator for unified context */
@@ -578,8 +598,7 @@ int setup_pebs_aggregator(pact_context_t *ctx, per_cpu_state_t *cpu_states, int 
     /* Mark PEBS as available via aggregator */
     ctx->pebs_available = true;
 
-    log_info("setup_pebs_aggregator", "PEBS filtering enabled for PID %d",
-             ctx->workload->target_pid);
+    log_info("setup_pebs_aggregator", "PEBS filtering enabled for %d PID(s)", ctx->n_workloads);
     log_info("setup_pebs_aggregator", "PEBS aggregator setup complete");
     return 0;
 }

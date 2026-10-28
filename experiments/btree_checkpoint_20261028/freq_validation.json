@@ -1,0 +1,104 @@
+{
+  "passed": true,
+  "unit_tests": [
+    {
+      "mode": "pac",
+      "command": [
+        "gcc",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-I",
+        "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028",
+        "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028/test_sample_score.c",
+        "-o",
+        "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028/build.freq/validation/test_pac"
+      ],
+      "stdout": "PASS: original PAC tier choice,truncation,negative clamp and18-bit saturation\n"
+    },
+    {
+      "mode": "freq",
+      "command": [
+        "gcc",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-I",
+        "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028",
+        "-DPACT_FREQ_BASED=1",
+        "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028/test_sample_score.c",
+        "-o",
+        "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028/build.freq/validation/test_freq"
+      ],
+      "stdout": "PASS: frequency is constant across tiers/windows/scalars;page totals proportional to samples;18-bit fit\n"
+    },
+    {
+      "mode": "freq_one",
+      "command": [
+        "gcc",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-I",
+        "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028",
+        "-DPACT_FREQ_BASED=1",
+        "-DPACT_FREQ_SAMPLE_SCORE=1",
+        "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028/test_sample_score.c",
+        "-o",
+        "/proj/cs740-uwmadison-PG0/samuraiy_pc_driven/experiments/pact_main_freq_20261028/build.freq/validation/test_freq_one"
+      ],
+      "stdout": "PASS: frequency is constant across tiers/windows/scalars;page totals proportional to samples;18-bit fit\n"
+    }
+  ],
+  "invalid_scores": [
+    {
+      "score": "0",
+      "compile_rejected": true
+    },
+    {
+      "score": "-1",
+      "compile_rejected": true
+    },
+    {
+      "score": "262144",
+      "compile_rejected": true
+    }
+  ],
+  "freq_score_assembly_mnemonics": [
+    "endbr64",
+    "mov",
+    "ret"
+  ],
+  "no_floating_point_attribution_in_freq_aggregate": true,
+  "policy_source_unchanged": {
+    "pact.c": true,
+    "binning.c": true,
+    "balance.c": true,
+    "cooling.c": true,
+    "perf.c": true,
+    "pmu.c": true,
+    "pmu-platform.c": true,
+    "cli.c": true
+  },
+  "workload_unchanged_between_PAC_freq_builds": true,
+  "smoke": {
+    "directory": "/users/samuraiy/btree_pact_main_freq_smoke_20261028/r1_t1_pact",
+    "checks": {
+      "correct_queries": true,
+      "completed": true,
+      "freq_mode_confirmed": true,
+      "raw_pebs_loss_checks": true,
+      "metadata_sufficient": true,
+      "sampling_period400": true,
+      "kernel_controls_restored": true
+    },
+    "migration": {
+      "promotion_attempts": 18687,
+      "promotion_successes": 18686,
+      "promotion_failures": 1,
+      "syscall_errno": {}
+    },
+    "PEBS_directory": "/users/samuraiy/pebs/btree_ratio_grid/btree_pact_main_freq_smoke_20261028/r1_t1_pact"
+  },
+  "scope": "Compile-time signal ablation,not performance evaluation. Frequency uses fixed262143 units/sample;thresholds and policy are retained,so absolute scale matters. PMU reads/filters/buffers are retained for comparable acquisition overhead;only attribution computation changes."
+}

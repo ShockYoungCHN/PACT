@@ -48,17 +48,22 @@ int pact_pin_to_cpu(int cpu)
 
 bool pact_check_all_targets_exited(pact_context_t *ctx)
 {
-    pid_t pid = ctx->workload->target_pid;
-    if (pid <= 0) {
-        return true;
+    bool any_alive = false;
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        if (ctx->workloads[i].exited) {
+            continue;
+        }
+        pid_t pid = ctx->workloads[i].target_pid;
+        if (pid <= 0) {
+            continue;
+        }
+        /* kill(pid, 0) probes process existence without sending a signal.
+         * EPERM = process exists but we cannot signal it — treat as alive. */
+        if (kill(pid, 0) == 0 || errno == EPERM) {
+            any_alive = true;
+            continue;
+        }
+        ctx->workloads[i].exited = true;
     }
-    /* kill(pid, 0) probes process existence without sending a signal.
-     * EPERM = process exists but we cannot signal it — treat as alive. */
-    if (kill(pid, 0) == 0) {
-        return false;
-    }
-    if (errno == EPERM) {
-        return false;
-    }
-    return true;
+    return !any_alive;
 }

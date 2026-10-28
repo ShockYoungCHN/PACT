@@ -29,7 +29,9 @@ struct pc_class_state {
 
     uint64_t text_base;
     uint64_t text_end;
+    pid_t bound_pid;
     char exe_path[512];
+    char text_path[512];
 
     struct pc_class_entry *table;
     uint32_t capacity; /* power of two */
@@ -38,6 +40,8 @@ struct pc_class_state {
     /* Diagnostics */
     uint64_t lookups;
     uint64_t hits;
+    uint32_t region_hist[64];
+    uint32_t n_examples;
     uint64_t miss_oob;   /* IP outside text mapping */
     uint64_t miss_table; /* in text but not in map → C4 */
     uint64_t saturations;
@@ -410,9 +414,16 @@ static int read_exe_path(pid_t pid, char *out, size_t out_sz)
     return 0;
 }
 
+static const char *path_basename(const char *path)
+{
+    const char *bn = strrchr(path, '/');
+    return bn ? bn + 1 : path;
+}
+
 /*
- * Find the first r-xp mapping whose pathname matches the workload exe
- * (exact or basename). Sets text_base/text_end.
+ * Per-pid text base. Two maps stay separate (one pc_class_state per workload).
+ * If this pid maps libintel-ext-pt-cpu.so, its r-xp is the text (DLRM IPs live
+ * in that .so, not the python exe). Otherwise the lowest exe r-xp, as before.
  */
 static int resolve_text_mapping(pc_class_state_t *st, pid_t pid)
 {
@@ -422,8 +433,7 @@ static int resolve_text_mapping(pc_class_state_t *st, pid_t pid)
         return -1;
     }
 
-    const char *base_name = strrchr(st->exe_path, '/');
-    base_name = base_name ? base_name + 1 : st->exe_path;
+    const char *base_name = path_basename(st->exe_path);
 
     char maps_path[64];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", (int)pid);
@@ -434,8 +444,11 @@ static int resolve_text_mapping(pc_class_state_t *st, pid_t pid)
     }
 
     char line[768];
-    uint64_t best_base = 0, best_end = 0;
-    bool found = false;
+    uint64_t exe_base = 0, exe_end = 0;
+    uint64_t so_base = 0, so_end = 0;
+    char so_path[512] = {0};
+    bool exe_found = false;
+    bool so_found = false;
     while (fgets(line, sizeof(line), fp)) {
         uint64_t start = 0, end = 0;
         char perms[8] = {0};
@@ -456,34 +469,56 @@ static int resolve_text_mapping(pc_class_state_t *st, pid_t pid)
         while (*pp == ' ') {
             pp++;
         }
+        /* DLRM: IPEX embedding IPs are in this .so, not the python exe. */
+        if (strcmp(path_basename(pp), "libintel-ext-pt-cpu.so") == 0) {
+            if (!so_found || start < so_base) {
+                so_base = start;
+                so_end = end;
+                strncpy(so_path, pp, sizeof(so_path) - 1);
+                so_path[sizeof(so_path) - 1] = '\0';
+                so_found = true;
+            }
+            continue;
+        }
         bool match = (strcmp(pp, st->exe_path) == 0);
         if (!match) {
-            const char *bn = strrchr(pp, '/');
-            bn = bn ? bn + 1 : pp;
-            match = (strcmp(bn, base_name) == 0);
+            match = (strcmp(path_basename(pp), base_name) == 0);
         }
         if (!match) {
             continue;
         }
         /* Prefer the lowest-address RX mapping (typical ELF text). */
-        if (!found || start < best_base) {
-            best_base = start;
-            best_end = end;
-            found = true;
+        if (!exe_found || start < exe_base) {
+            exe_base = start;
+            exe_end = end;
+            exe_found = true;
         }
     }
     fclose(fp);
 
-    if (!found) {
+    st->bound_pid = pid;
+    if (so_found) {
+        pc_class_set_text_base(st, so_base, so_end);
+        strncpy(st->text_path, so_path, sizeof(st->text_path) - 1);
+        st->text_path[sizeof(st->text_path) - 1] = '\0';
+        log_info("pc_class_enable_for_pid",
+                 "pid=%d text_base=0x%lx text_end=0x%lx so=%s exe=%s", (int)pid,
+                 (unsigned long)st->text_base, (unsigned long)st->text_end, st->text_path,
+                 st->exe_path);
+        return 0;
+    }
+    if (!exe_found) {
         log_error("pc_class_enable_for_pid",
                   "No r-xp mapping for exe '%s' in /proc/%d/maps", st->exe_path, (int)pid);
         return -1;
     }
 
-    pc_class_set_text_base(st, best_base, best_end);
+    pc_class_set_text_base(st, exe_base, exe_end);
+    strncpy(st->text_path, st->exe_path, sizeof(st->text_path) - 1);
+    st->text_path[sizeof(st->text_path) - 1] = '\0';
     log_info("pc_class_enable_for_pid",
-             "text_base=0x%lx text_end=0x%lx exe=%s", (unsigned long)st->text_base,
-             (unsigned long)st->text_end, st->exe_path);
+             "pid=%d text_base=0x%lx text_end=0x%lx exe=%s", (int)pid,
+             (unsigned long)st->text_base, (unsigned long)st->text_end, st->exe_path);
     return 0;
 }
 
@@ -525,11 +560,29 @@ void pc_class_log_stats(const pc_class_state_t *st)
     mut->last_logged_lookups = st->lookups ? st->lookups : 1;
     double hit_rate = st->lookups ? (100.0 * (double)st->hits / (double)st->lookups) : 0.0;
     log_info("pc_class_stats",
-             "lookups=%lu hits=%lu (%.1f%%) miss_oob=%lu miss_table=%lu saturations=%lu "
-             "text_base=0x%lx",
-             (unsigned long)st->lookups, (unsigned long)st->hits, hit_rate,
+             "pid=%d lookups=%lu hits=%lu (%.1f%%) miss_oob=%lu miss_table=%lu saturations=%lu "
+             "text_base=0x%lx text=%s",
+             (int)st->bound_pid, (unsigned long)st->lookups, (unsigned long)st->hits, hit_rate,
              (unsigned long)st->miss_oob, (unsigned long)st->miss_table,
-             (unsigned long)st->saturations, (unsigned long)st->text_base);
+             (unsigned long)st->saturations, (unsigned long)st->text_base, st->text_path);
+    if (st->lookups > 0) {
+        char hist[256];
+        size_t used = 0;
+        hist[0] = '\0';
+        for (int b = 0; b < 64 && used + 16 < sizeof(hist); b++) {
+            if (st->region_hist[b] == 0) {
+                continue;
+            }
+            int n = snprintf(hist + used, sizeof(hist) - used, " %d:%u", b, st->region_hist[b]);
+            if (n < 0) {
+                break;
+            }
+            used += (size_t)n;
+        }
+        if (hist[0]) {
+            log_info("pc_class_regions", "pid=%d offset>>20%s", (int)st->bound_pid, hist);
+        }
+    }
 }
 
 void pc_class_log_stats_final(pc_class_state_t *st)
@@ -546,6 +599,15 @@ void pc_class_log_stats_final(pc_class_state_t *st)
  * C3 (w=0.05 -> ~51) nonzero and C1 (w~16 -> ~16k) well inside 18-bit PAC. */
 #define PC_CLASS_SCORE_UNIT 1024.0
 
+static pc_class_state_t *pc_class_for_pid(struct pact_context *ctx, pid_t pid)
+{
+    pact_workload_t *wl = pact_wl_find(ctx, pid);
+    if (wl && wl->pc_class && pc_class_enabled(wl->pc_class)) {
+        return wl->pc_class;
+    }
+    return NULL;
+}
+
 /* Resolve ip -> class weight, updating lookup/hit/miss diagnostics. */
 static double pc_class_weight_for_ip(pc_class_state_t *st, uint64_t ip)
 {
@@ -555,6 +617,10 @@ static double pc_class_weight_for_ip(pc_class_state_t *st, uint64_t ip)
         st->miss_oob++;
     } else {
         uint64_t offset = ip - st->text_base;
+        uint32_t bucket = (uint32_t)(offset >> 20);
+        if (bucket < 64) {
+            st->region_hist[bucket]++;
+        }
         uint8_t found;
         if (map_lookup(st, offset, &found) == 0) {
             class_id = found;
@@ -562,17 +628,22 @@ static double pc_class_weight_for_ip(pc_class_state_t *st, uint64_t ip)
         } else {
             st->miss_table++;
         }
+        if (st->n_examples < 12) {
+            st->n_examples++;
+            log_info("pc_class_sample", "pid=%d offset=0x%lx %s", (int)st->bound_pid,
+                     (unsigned long)offset, class_id == PC_CLASS_C4_OTHER ? "miss" : "hit");
+        }
     }
     return st->weights[class_id];
 }
 
-uint32_t scale_by_pc_class(struct pact_context *ctx, uint64_t ip, uint32_t attributed,
+uint32_t scale_by_pc_class(struct pact_context *ctx, pid_t pid, uint64_t ip, uint32_t attributed,
                            uint32_t pac_value_max)
 {
-    if (!ctx || !ctx->pc_class || !ctx->pc_class->enabled || attributed == 0) {
+    pc_class_state_t *st = pc_class_for_pid(ctx, pid);
+    if (!st || attributed == 0) {
         return attributed;
     }
-    pc_class_state_t *st = ctx->pc_class;
     double w = pc_class_weight_for_ip(st, ip);
     if (w <= 0.0) {
         return 0;
@@ -592,12 +663,12 @@ uint32_t scale_by_pc_class(struct pact_context *ctx, uint64_t ip, uint32_t attri
     return (uint32_t)scaled;
 }
 
-uint32_t pc_class_score(struct pact_context *ctx, uint64_t ip, uint32_t pac_value_max)
+uint32_t pc_class_score(struct pact_context *ctx, pid_t pid, uint64_t ip, uint32_t pac_value_max)
 {
-    if (!ctx || !ctx->pc_class || !ctx->pc_class->enabled) {
+    pc_class_state_t *st = pc_class_for_pid(ctx, pid);
+    if (!st) {
         return 0;
     }
-    pc_class_state_t *st = ctx->pc_class;
     double s = pc_class_weight_for_ip(st, ip) * PC_CLASS_SCORE_UNIT;
     if (s <= 0.0) {
         return 0;

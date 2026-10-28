@@ -9,8 +9,8 @@
 
 int pact_validate_configuration(const pact_config_t *config)
 {
-    if (config->target_pid <= 0) {
-        fprintf(stderr, "Error: --workload <pid> is required.\n");
+    if (config->n_workloads < 1 || config->target_pid <= 0) {
+        fprintf(stderr, "Error: --workload <pid> is required (repeatable).\n");
         return -1;
     }
 

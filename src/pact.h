@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <sys/types.h>
 #include <pthread.h>
 #include "pmu.h"
 #include "obj-pool.h"
@@ -26,6 +27,9 @@
 #define PACT_UNUSED
 #endif
 #endif
+
+/* Hard cap: coloc experiments need 2; extra slots for future tenants. */
+#define PACT_MAX_WORKLOADS 4
 
 /* Forward declarations */
 typedef struct mco_coro mco_coro;
@@ -85,7 +89,7 @@ typedef enum {
 
 /* Coroutine types */
 typedef enum {
-    CORO_TYPE_PEBS,    /* sampling */
+    CORO_TYPE_PEBS,    /* reserved slot; sampling runs on a thread, never scheduled */
     CORO_TYPE_PAC,     /* adaptive */
     CORO_TYPE_COOLING, /* cooling */
     CORO_TYPE_STATS,   /* stats */
@@ -102,6 +106,13 @@ typedef struct migration_entry {
     uint64_t page_addr;   /* 4K virtual address to move */
     int target_node;      /* Target NUMA node (0=fast, 1=slow) */
 } migration_entry_t;
+
+/* PEBS → PAC ring payload. pid is required so two processes with overlapping
+ * VAs update distinct PAC tables. */
+typedef struct {
+    uint64_t encoded;
+    pid_t pid;
+} pac_update_t;
 
 /* PEBS event encoding: assume 57 bits virtual addr, we use:
  * - 63-57, 7 bits: pac value (high)
@@ -211,8 +222,8 @@ typedef struct {
     /* PAC and memory access statistics */
     uint64_t last_time_running;
     uint64_t time_running;
-    uint64_t llc_misses_fast;
-    uint64_t llc_misses_slow;
+    _Atomic uint64_t llc_misses_fast;
+    _Atomic uint64_t llc_misses_slow;
     uint64_t pac_updates;
     uint64_t avg_pac;
 
@@ -220,7 +231,7 @@ typedef struct {
     uint64_t cooling_decays;
 
     /* PEBS sampling */
-    uint64_t pebs_events_processed;
+    _Atomic uint64_t pebs_events_processed;
 
     /* ping-pong effect logging - repromotions (demoted then promoted) */
     uint64_t repromotions_pact_pact;   /* PACT demoted → PACT promoted */
@@ -253,6 +264,7 @@ typedef struct {
 /* khash for PAC table defined in pact_minicoro.h */
 
 DEFINE_RING_BUFFER(uint64_t, uint64)
+DEFINE_RING_BUFFER(pac_update_t, pac_update)
 
 /* Ring buffer for migration entries (thread-based migration, single-page) */
 DEFINE_RING_BUFFER(migration_entry_t, migration_entry)
@@ -272,8 +284,10 @@ struct coro_timing {
  * Holds workload-specific configuration, PMU state, and statistics
  */
 typedef struct pact_workload {
-    /* Process identification */
-    pid_t target_pid; /* Process ID */
+    /* Process identification. target_pid is kept after exit so in-flight
+     * PAC/rerank work still resolves to this slot, not workloads[0]. */
+    pid_t target_pid;
+    _Atomic bool exited; /* sampling/control publish; all threads read */
     char name[64];    /* Optional workload name/label */
 
     /* CPU configuration */
@@ -293,28 +307,33 @@ typedef struct pact_workload {
     int nr_cha;                        /* Number of CHAs for this workload */
 
     /* Per-tier MLP for the current window (ΔT1/ΔT2 over the workload's
-     * CHAs, Algorithm 1). */
-    double workload_mlp_fast;
-    double workload_mlp_slow;
+     * CHAs, Algorithm 1). Sampling writes; control reads for telemetry. */
+    _Atomic double workload_mlp_fast;
+    _Atomic double workload_mlp_slow;
 
     /* Per-workload statistics */
     pact_stats_t stats;          /* Workload-specific statistics */
-    uint64_t total_pebs_samples; /* Cumulative PEBS samples attributed to this workload */
+    _Atomic uint64_t total_pebs_samples; /* Cumulative PEBS samples attributed to this workload */
 
     /* Workload data structures (PAC tracking + migration plumbing). */
     pac_table_t *pac_table;
     reservoir_t *reservoir;
     binning_state_t *binning;
     ring_buffer_migration_entry_t *migration_ring;
+
+    /* Per-workload PC-class map (text_base is per-PID / ASLR). */
+    struct pc_class_state *pc_class;
 } pact_workload_t;
 
-/* PACT runtime context — single instance per process; owns the workload. */
+/* PACT runtime context — single instance per process; owns the workload(s). */
 struct pact_context {
     /* ===== Core Data Structures ===== */
-    ring_buffer_uint64_t *pac_update_ring; /* PEBS -> PAC updates ring buffer */
+    ring_buffer_pac_update_t *pac_update_ring; /* PEBS -> PAC updates (addr+pid) */
 
-    /* The workload — owned by the context; always non-NULL once
-     * initialize_workloads() succeeds. */
+    /* Workloads — embedded array. `workload` is always &workloads[0] so
+     * existing single-wl call sites keep compiling. */
+    pact_workload_t workloads[PACT_MAX_WORKLOADS];
+    int n_workloads;
     pact_workload_t *workload;
 
     /* CPU set the workload runs on (sched_getaffinity result, capped to 64). */
@@ -388,7 +407,7 @@ struct pact_context {
     uint64_t cooling_trigger_samples; /* global sample-count threshold */
 
     /* Cooling-related stats */
-    uint64_t sample_counts;
+    _Atomic uint64_t sample_counts; /* sampling publishes to cooling */
 
     /* Hardware constants */
     uint64_t k_constant_dram; /* DRAM latency constant (238) */
@@ -413,12 +432,16 @@ struct pact_context {
 
     /* ===== Coroutine scheduling state ===== */
 
+    /* ===== Sampling Thread ===== */
+    pthread_t sampling_thread;
+    bool sampling_thread_joinable; /* owned by control; join before freeing PEBS */
+
     /* ===== Migration Thread ===== */
     pthread_t migration_thread;             /* Migration thread handle */
     volatile bool migration_thread_running; /* Thread control flag */
 
     /* CPU affinity configuration */
-    int monitor_cpu;   /* CPU for main event loop (-1 = no pinning) */
+    int monitor_cpu;   /* CPU for control and sampling (-1 = no pinning) */
     int migration_cpu; /* CPU for migration thread (-1 = no pinning) */
 };
 
@@ -430,10 +453,44 @@ extern pact_context_t *g_pact_ctx;
 #define g_pact g_pact_ctx
 
 
-/* TGID filter: exact match against the workload's target_pid. */
+/* Look up the workload that owns `pid`, or NULL. */
+static inline pact_workload_t *pact_wl_find(const pact_context_t *ctx, pid_t pid)
+{
+    if (!ctx || pid <= 0) {
+        return NULL;
+    }
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        if (ctx->workloads[i].target_pid == pid) {
+            return (pact_workload_t *)&ctx->workloads[i];
+        }
+    }
+    return NULL;
+}
+
+/* Live TGID filter: ignore tenants that have already exited. */
 static inline bool is_target_pid(const pact_context_t *ctx, pid_t pid)
 {
-    return ctx->workload->target_pid == pid;
+    pact_workload_t *wl = pact_wl_find(ctx, pid);
+    return wl && !wl->exited;
+}
+
+static inline bool pact_wl_exited(const pact_context_t *ctx, pid_t pid)
+{
+    pact_workload_t *wl = pact_wl_find(ctx, pid);
+    return !wl || wl->exited;
+}
+
+static inline int pact_wl_index(const pact_context_t *ctx, pid_t pid)
+{
+    if (!ctx || pid <= 0) {
+        return -1;
+    }
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        if (ctx->workloads[i].target_pid == pid) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 /* Interval (in ms) for the given coroutine type. Looks up the configured
@@ -480,6 +537,6 @@ static inline const char *pact_coro_name(coro_type_t type)
  * meta may be NULL (granule neighbor). Returns false if the ring is full
  * or the page is already in flight. */
 bool pact_enqueue_move(pact_context_t *pact, pac_metadata_t *meta, uint64_t page_addr,
-                       int target_node);
+                       int target_node, pid_t pid);
 
 #endif /* PACT_H */

@@ -14,7 +14,11 @@ source ./cxl-global.sh || { echo "Error: cannot source ./cxl-global.sh" >&2; exi
 UNCORE_ARGS="${UNCORE_ARGS:-2000000 2000000 500000 500000}"
 
 echo "=== [1/4] Setting uncore frequency: $UNCORE_ARGS ==="
-./modify-uncore-freq.sh $UNCORE_ARGS
+# Uncore sysfs disappears when all package CPUs are offline.
+for cpu_online in /sys/devices/system/node/node1/cpu*/online; do
+    if [[ -e "$cpu_online" ]]; then echo 1 | sudo tee "$cpu_online" >/dev/null; break; fi
+done
+sudo ./modify-uncore-freq.sh $UNCORE_ARGS
 
 echo "=== [2/4] Configuring CXL experiment environment (check_cxl_conf) ==="
 check_cxl_conf

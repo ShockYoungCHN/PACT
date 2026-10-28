@@ -145,10 +145,8 @@ static void print_one_coro_sched(pact_context_t *pact, const char *name, coro_ty
 static void print_coro_sched_stats(pact_context_t *pact)
 {
     printf("\n=== Coroutine Scheduling Statistics ===\n");
-    /* Display names retained for human-readable stats output ("Sampling"
-     * rather than the internal "PEBS"). The Adaptive coroutine is
-     * intentionally omitted — pre-existing output convention. */
-    print_one_coro_sched(pact, "Sampling", CORO_TYPE_PEBS);
+    printf("Sampling thread: %u ms sleep between drains\n", pact->sampling_interval_ms);
+    /* The Adaptive coroutine is intentionally omitted — pre-existing convention. */
     print_one_coro_sched(pact, "Cooling", CORO_TYPE_COOLING);
     print_one_coro_sched(pact, "Stats", CORO_TYPE_STATS);
 }

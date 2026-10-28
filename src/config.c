@@ -36,6 +36,8 @@ void pact_init_config(pact_config_t *config)
 
     /* target_pid is required; -1 here means "not yet supplied" — CLI
      * parsing or pact_validate_configuration errors out before init. */
+    memset(config->target_pids, 0, sizeof(config->target_pids));
+    config->n_workloads = 0;
     config->target_pid = -1;
     config->workload_name[0] = '\0';
 
@@ -46,6 +48,8 @@ void pact_init_config(pact_config_t *config)
     config->pac_pool_max = PACT_DEFAULT_PAC_POOL_MAX;
 
     config->class_weights_path[0] = '\0';
+    memset(config->pc_class_map_paths, 0, sizeof(config->pc_class_map_paths));
+    config->n_pc_class_maps = 0;
     config->pc_class_map_path[0] = '\0';
     config->score_sample_path[0] = '\0';
     config->score_regions_path[0] = '\0';

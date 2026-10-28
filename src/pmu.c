@@ -354,25 +354,34 @@ void ioctl_pmu_core_perf_events(per_cpu_state_t *cpu_states, int nr_target_cpus,
 
 void start_pmu_perf_events(pact_context_t *ctx)
 {
-    pact_workload_t *wl = ctx->workload;
+    pact_workload_t *cha_wl = ctx->workload;
     ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_RESET);
-    ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_RESET);
-    if (wl->counting_leader.fd >= 0) {
-        ioctl(wl->counting_leader.fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
+    ioctl_pmu_cha_perf_events(cha_wl->cha_pmus, cha_wl->nr_cha, PERF_EVENT_IOC_RESET);
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        pact_workload_t *wl = &ctx->workloads[i];
+        if (wl->counting_leader.fd >= 0) {
+            ioctl(wl->counting_leader.fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
+        }
     }
-    ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_ENABLE);
-    if (wl->counting_leader.fd >= 0) {
-        ioctl(wl->counting_leader.fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
+    ioctl_pmu_cha_perf_events(cha_wl->cha_pmus, cha_wl->nr_cha, PERF_EVENT_IOC_ENABLE);
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        pact_workload_t *wl = &ctx->workloads[i];
+        if (wl->counting_leader.fd >= 0) {
+            ioctl(wl->counting_leader.fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
+        }
     }
     ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_ENABLE);
 }
 
 void stop_pmu_perf_events(pact_context_t *ctx)
 {
-    pact_workload_t *wl = ctx->workload;
-    ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_DISABLE);
-    if (wl->counting_leader.fd >= 0) {
-        ioctl(wl->counting_leader.fd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
+    pact_workload_t *cha_wl = ctx->workload;
+    ioctl_pmu_cha_perf_events(cha_wl->cha_pmus, cha_wl->nr_cha, PERF_EVENT_IOC_DISABLE);
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        pact_workload_t *wl = &ctx->workloads[i];
+        if (wl->counting_leader.fd >= 0) {
+            ioctl(wl->counting_leader.fd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
+        }
     }
     ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_DISABLE);
 }
@@ -695,25 +704,31 @@ static void calculate_workload_mlp(pact_workload_t *wl)
  * stats. MLP is computed from CHA TOR ratios (Algorithm 1). */
 void read_pmu_counting_events(pact_context_t *ctx)
 {
-    pact_workload_t *wl = ctx->workload;
-
-    read_workload_counting_events(wl);
-    uint64_t wl_fast = wl->counting_events[CORE_EVENT_LLC_MISS_FAST].value;
-    uint64_t wl_slow = wl->counting_events[CORE_EVENT_LLC_MISS_SLOW].value;
-    log_trace("read_pmu_counting_events", "Workload LLC misses fast=%lu, slow=%lu", wl_fast,
-              wl_slow);
-
-    wl->stats.llc_misses_fast = wl_fast;
-    wl->stats.llc_misses_slow = wl_slow;
-    if (wl->counting_leader.fd >= 0) {
-        wl->stats.time_running = wl->counting_leader.time_running - wl->stats.last_time_running;
-        wl->stats.last_time_running = wl->counting_leader.time_running;
+    for (int i = 0; i < ctx->n_workloads; i++) {
+        pact_workload_t *wl = &ctx->workloads[i];
+        read_workload_counting_events(wl);
+        uint64_t wl_fast = wl->counting_events[CORE_EVENT_LLC_MISS_FAST].value;
+        uint64_t wl_slow = wl->counting_events[CORE_EVENT_LLC_MISS_SLOW].value;
+        wl->stats.llc_misses_fast = wl_fast;
+        wl->stats.llc_misses_slow = wl_slow;
+        if (wl->counting_leader.fd >= 0) {
+            wl->stats.time_running = wl->counting_leader.time_running - wl->stats.last_time_running;
+            wl->stats.last_time_running = wl->counting_leader.time_running;
+        }
+        log_trace("read_pmu_counting_events", "wl[%d] pid=%d LLC fast=%lu slow=%lu", i,
+                  (int)wl->target_pid, wl_fast, wl_slow);
     }
 
-    read_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha);
-    calculate_workload_mlp(wl);
-    log_debug("read_pmu_counting_events", "Workload (PID %d) MLP: fast=%.2f, slow=%.2f",
-              wl->target_pid, wl->workload_mlp_fast, wl->workload_mlp_slow);
+    /* CHA is socket-wide: open once on workloads[0], copy MLP to peers. */
+    pact_workload_t *cha_wl = ctx->workload;
+    read_pmu_cha_perf_events(cha_wl->cha_pmus, cha_wl->nr_cha);
+    calculate_workload_mlp(cha_wl);
+    for (int i = 1; i < ctx->n_workloads; i++) {
+        ctx->workloads[i].workload_mlp_fast = cha_wl->workload_mlp_fast;
+        ctx->workloads[i].workload_mlp_slow = cha_wl->workload_mlp_slow;
+    }
+    log_debug("read_pmu_counting_events", "CHA MLP (shared): fast=%.2f, slow=%.2f",
+              cha_wl->workload_mlp_fast, cha_wl->workload_mlp_slow);
 }
 
 /* Open one counting group per workload: dummy SW leader + LLC-miss events,

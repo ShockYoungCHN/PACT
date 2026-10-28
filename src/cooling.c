@@ -52,7 +52,11 @@ void cooling_coroutine(mco_coro *co)
         if (ctx->cooling_alpha < 1.0) {
             uint64_t current = ctx->sample_counts;
             if (current - last_trigger_count >= ctx->cooling_trigger_samples) {
-                cool_pac_table(ctx, ctx->workload->pac_table, ctx->cooling_alpha, co);
+                for (int i = 0; i < ctx->n_workloads; i++) {
+                    if (ctx->workloads[i].pac_table) {
+                        cool_pac_table(ctx, ctx->workloads[i].pac_table, ctx->cooling_alpha, co);
+                    }
+                }
                 last_trigger_count = current;
             }
         }
