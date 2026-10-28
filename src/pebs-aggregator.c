@@ -213,18 +213,7 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
  * PEBS_ENCODE_PAC packs the PAC value into 18 bits, so clamp to 262143 here:
  * a larger value would be silently truncated by the encoder and corrupt the
  * PAC score. */
-#define PAC_VALUE_MAX 262143u
-static inline uint32_t compute_sample_stalls(uint8_t tier, double fast_stalls, double slow_stalls)
-{
-    double base = (tier == 0) ? fast_stalls : slow_stalls;
-    if (base < 0.0) {
-        return 0;
-    }
-    if (base > (double)PAC_VALUE_MAX) {
-        return PAC_VALUE_MAX;
-    }
-    return (uint32_t)base;
-}
+#include "sample_score.h"
 
 /* Decode one PEBS sample into address/tier. */
 static inline void decode_pebs_sample(const uint64_t *events, int i, uint64_t *out_addr,
@@ -239,6 +228,7 @@ static inline void decode_pebs_sample(const uint64_t *events, int i, uint64_t *o
  * The /pebs_sampling_period division is intentionally absent: LDLAT filtering,
  * ring drops, and quiet-skip losses break the ideal ev≈miss/period identity,
  * so we let PAC scale with observed sample population instead. */
+#if !PACT_FREQ_BASED
 static void compute_attributed_stalls(pact_context_t *ctx, pebs_aggregator_t *agg,
                                       double *out_fast_stalls, double *out_slow_stalls)
 {
@@ -254,6 +244,8 @@ static void compute_attributed_stalls(pact_context_t *ctx, pebs_aggregator_t *ag
         *out_slow_stalls = (ctx->k_constant_cxl * wl->stats.llc_misses_slow) / slow_coeff;
     }
 }
+
+#endif
 
 /*
  * Drain, attribute, and publish one window's PEBS samples.
@@ -308,7 +300,9 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
      * the phase-A reads; the LLC-miss and MLP inputs were read from the
      * PMU for this same window just before this call. */
     double fast_stalls = 0.0, slow_stalls = 0.0;
+#if !PACT_FREQ_BASED
     compute_attributed_stalls(ctx, agg, &fast_stalls, &slow_stalls);
+#endif
 
     int pac_count = 0;
     for (int i = 0; i < n; i++) {
@@ -399,6 +393,13 @@ void pebs_aggregator_coroutine(mco_coro *co)
 
     log_info("pebs_aggregator_coroutine", "Starting with %d CPUs, mask=0x%lx", agg->num_cpus,
              agg->cpu_mask);
+
+#if PACT_FREQ_BASED
+    log_info("score_mode", "Frequency: fixed per-sample increment=%u;no per-window MLP attribution",
+             (unsigned)PACT_FREQ_SAMPLE_SCORE);
+#else
+    log_info("score_mode", "Original PAC: per-window stall attribution");
+#endif
 
     int debug_counter = 0;
 

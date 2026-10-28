@@ -195,6 +195,27 @@ the ones we used in the paper**. A few of the most relevant knobs:
 Run `./src/pact --help` for the full option list (cooling, timing intervals,
 logging, diagnostics).
 
+### Compile-time frequency baseline
+
+The default build retains the PAC stall-attribution model. For a controlled
+sample-frequency baseline using the same sampling and migration policy:
+
+```bash
+make -C src freq                             # fixed262143 units/sample
+make -C src freq FREQ_SAMPLE_SCORE=1024        # optional compile-time scale
+make -C src                                  # return to original PAC
+bash tests/test_sample_score.sh
+```
+
+`PACT_FREQ_BASED=1` replaces each processed sample's PAC increment with the
+same constant across tiers,PCs and windows. The mode is selected at compile
+time,with no runtime mode branch. PMU/PEBS acquisition,binning,cooling and
+kernel-LRU demotion are retained. This is sampled-load frequency,not all-load
+frequency. The fixed increment is a score scale,not a fitted weight;existing
+promotion thresholds are unchanged,so eligibility remains scale-sensitive.
+The build system rebuilds objects when these compiler flags change. A startup
+message identifies the compiled mode. `make freq` leaves detailed logging off.
+
 ## Baseline tiering systems
 
 [`baselines/`](baselines/) holds kernel patches and build scripts for TPP,

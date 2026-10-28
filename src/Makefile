@@ -43,6 +43,12 @@ $(TARGET): $(OBJECTS)
 
 -include $(DEPS)
 
+# Frequency score changes only attribution;sampling/PMU/policy remain unchanged.
+FREQ_SAMPLE_SCORE ?= 262143
+.PHONY: freq
+freq:
+	$(MAKE) CFLAGS="$(CFLAGS) -DPACT_FREQ_BASED=1 -DPACT_FREQ_SAMPLE_SCORE=$(FREQ_SAMPLE_SCORE)" all
+
 # Optional build with file logging enabled.
 logging:
 	$(MAKE) clean

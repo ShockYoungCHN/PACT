@@ -22,6 +22,12 @@ jobs:
       - name: Build (logging variant)
         run: make -C src logging
 
+      - name: Build (frequency variant)
+        run: make -C src freq
+
+      - name: Sample-score regression
+        run: bash tests/test_sample_score.sh
+
       - name: Brace-style check
         run: make -C src check-style
 
